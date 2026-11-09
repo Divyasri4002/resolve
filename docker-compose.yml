@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: resolve
+      POSTGRES_PASSWORD: resolve
+      POSTGRES_DB: resolve
+      # Phase 4.6.1: the runtime role's password, set once at fresh-volume init by
+      # db/init/01-roles.sh. Never consumed by the backend container directly.
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-resolve_app}
+    ports:
+      - "5432:5432"
+    volumes:
+      - resolve_pgdata:/var/lib/postgresql/data
+      # Fresh-volume role creation (runs once on an empty data dir) and the operator-run
+      # role-separation migration, both read-only from the container's point of view.
+      - ./backend/db/init:/docker-entrypoint-initdb.d:ro
+      - ./backend/db/migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resolve"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # Phase 4.6.1: the backend runs as resolve_app — the runtime role that owns nothing.
+      # Owner-level DDL never happens here; schema work is the db-bootstrap service plus
+      # the operator-run db/migrations/role_separation.sql (see those files' docstrings).
+      DATABASE_URL: postgresql+asyncpg://resolve_app:${POSTGRES_APP_PASSWORD:-resolve_app}@db:5432/resolve
+      # Phase 4.6.2: the external evidence publisher is OFF here, explicitly. Enabling it
+      # is a deliberate operator action: set the LEDGER_OBJECT_STORE_* credentials in
+      # backend/.env, change this to "true", and run db/migrations/ledger_install.sql —
+      # strictly AFTER role_separation.sql (re-run ledger_install.sql if role_separation
+      # is ever re-run, or startup enforcement will fail loudly on the stripped pin
+      # grants). While the ledger is not exactly current the submission currency gate
+      # refuses purchases on its own, so a half-enabled deployment fails closed, not
+      # silently.
+      LEDGER_PUBLISH_ENABLED: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  db-bootstrap:
+    build: ./backend
+    profiles: ["tools"]
+    environment:
+      # One-time schema bootstrap under the compose superuser identity (the only identity
+      # that may ALTER ... OWNER); db/migrations/role_separation.sql then hands ownership
+      # to the dedicated NOLOGIN owner role. Nothing ever CONNECTS as that role.
+      RESOLVE_DB_BOOTSTRAP_URL: postgresql+asyncpg://resolve:${POSTGRES_PASSWORD:-resolve}@db:5432/resolve
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python -m app.bootstrap_database
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  resolve_pgdata:

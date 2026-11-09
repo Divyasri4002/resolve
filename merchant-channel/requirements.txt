@@ -1,0 +1,12 @@
+# The merchant-channel package's own dependency pins, declared without touching
+# backend/requirements.txt. Every package already exists in the execution image at exactly these
+# versions (they are the backend's own pins); nothing new is installed anywhere. The trigger
+# service (merchant_channel/trigger_service.py) is the reason fastapi/uvicorn/pydantic are
+# declared here: it is a standalone HTTP process inside this package and must not import or
+# depend on the backend's settings module.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+httpx==0.27.2
+pytest==8.3.3
+pytest-asyncio==0.24.0

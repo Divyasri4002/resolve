@@ -1,0 +1,1130 @@
+time="2026-11-07T13:50:40+05:30" level=warning msg="D:\\RAZORPAY\\resolve\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container resolve-backend-run-063f63d8f579 Creating 
+ Container resolve-backend-run-063f63d8f579 Created 
+................................................................F....... [  5%]
+..............F......................................................... [ 10%]
+........................................................................ [ 15%]
+........................................................................ [ 20%]
+........................................................................ [ 25%]
+........................................................................ [ 30%]
+...............................................ssss..................... [ 35%]
+........................................................................ [ 40%]
+..............................................................F......... [ 45%]
+........................................................................ [ 50%]
+...F.F....................F.......F...........F.....FF.F.........F...... [ 55%]
+........................................................................ [ 60%]
+........................................................................ [ 65%]
+........................................................................ [ 70%]
+........................................................................ [ 75%]
+........................................................................ [ 80%]
+........................................................................ [ 85%]
+........................................................................ [ 90%]
+........................................................................ [ 95%]
+..............................................................           [100%]
+=================================== FAILURES ===================================
+___________ test_the_agent_layer_writes_no_sql_and_reads_no_raw_rows ___________
+
+    def test_the_agent_layer_writes_no_sql_and_reads_no_raw_rows():
+        """
+        The agent layer moves state through ORM objects and the router's own functions only.
+    
+        No `text()` clause, no hand-built SQL, and no `SELECT *` of a table it was never given: the context
+        builder reads named attributes off named objects, which is what makes "the model cannot see a whole
+        row" a property of the code rather than a hope.
+        """
+        for name, source in _agent_layer_sources():
+            code = _code_of(source)
+>           assert not re.search(r"(?<![\w.])text\(", code), name
+E           AssertionError: conversation.py
+E           assert not <re.Match object; span=(2476, 2481), match='text('>
+E            +  where <re.Match object; span=(2476, 2481), match='text('> = <function search at 0x71ca1196de40>('(?<![\\w.])text\\(', 'from __future__ import annotations\n\nimport zlib\nfrom typing import Any\n\nfrom sqlalchemy import func, select, tex...            for item in value[:20]\n            ]\n        else:\n            cleaned[key] = value\n    return cleaned')
+E            +    where <function search at 0x71ca1196de40> = re.search
+
+tests/test_core2_agent_security.py:542: AssertionError
+______ test_golden_lifecycle_from_natural_language_to_an_audited_outcome _______
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca0ad00ea0>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca0accff00>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca0c032b60>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 2}
+refund_api = <tests.test_refund_execution.RefundApi object at 0x71ca0afc2010>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:21:30.544856', 'event_id...ated_at': '2026-11-07T08:21:30.810304', 'event_id': 'evt_abb98d554386', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_golden_lifecycle_from_natural_language_to_an_audited_outcome(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, refund_api, recorded_events
+    ):
+        make_client, test_session = restart_env
+        client = make_client()
+        email = "golden@core3a.test"
+    
+        async with client:
+            # ---- STEP 1: authenticate -------------------------------------------- #
+            # Registration sets the session cookie; every later call below is this buyer's own, and the
+            # observer test further down proves a cookie-less caller gets nothing.
+            await _register(client, "Golden Buyer", email)
+    
+            # ---- STEP 2: a natural-language mission, with the product feed DOWN --- #
+            # Discovery is deliberately unavailable when the mission is created, so it parks with zero
+            # products. The only way this chain can now reach an order is if the AGENT runs the search.
+            install_mock_discovery(
+                error=ProductSearchError("Product search is unavailable", status_code=503)
+            )
+            created = await client.post("/missions/shopping", json={"prompt": SHAMPOO_PROMPT})
+            assert created.status_code == 200, created.text
+            mission_id = created.json()["mission_id"]
+            assert created.json()["status"] == "ready_for_discovery"
+            assert (await _intent(client, mission_id)).get("discovered_products") == []
+    
+            # ---- STEP 3: user message -> reasoning decision -> declared tool ------ #
+            install_mock_discovery(sample_results=sample_products)
+            turn = await _agent(client, mission_id, "find the cheapest option that fits my budget")
+            assert _tools(turn) == ["search_products"], "the agent must choose the search tool itself"
+            assert turn["agent_tools"][0]["success"] is True
+            assert turn["mission_status"] == "discovery_completed"
+    
+            # ---- STEP 4: real discovery, persisted through the existing mechanism -- #
+            stored = (await _intent(client, mission_id))["discovered_products"]
+            feed = {product.product_id: product for product in sample_products}
+            assert stored, "the agent's search produced results"
+            assert [product["product_id"] for product in turn["discovered_products"]] == [
+                product["product_id"] for product in stored
+            ]
+            budget = Decimal(str((await _intent(client, mission_id))["budget"]))
+            for product in stored:
+                assert product["product_id"] in feed, "nothing was invented"
+                # Every stored field is the provider's own answer, unchanged.
+                assert Decimal(str(product["extracted_price"])) == feed[product["product_id"]].extracted_price
+                assert product["merchant"] == feed[product["product_id"]].merchant
+                assert Decimal(str(product["extracted_price"])) <= budget, "the budget filter is the server's"
+            assert (await _intent(client, mission_id))["state"] == "discovery_completed"
+    
+            # ---- STEP 5: guarded selection --------------------------------------- #
+            # S1 — an id this mission never discovered is refused and changes nothing.
+            refused = await _select(client, mission_id, "item_the_agent_invented")
+            assert refused.status_code == 400
+            assert "not part of this mission" in refused.json()["detail"]
+            assert (await _intent(client, mission_id)).get("selected_product") is None
+            # S2 — the client may not price its own checkout: only the id is trusted.
+            chosen = _cheapest(stored)
+            smuggled = await client.post(
+                f"/missions/{mission_id}/shopping/select-product",
+                json={"product_id": chosen["product_id"], "extracted_price": "1", "merchant": "Me"},
+            )
+            assert smuggled.status_code == 200, smuggled.text
+            selected = smuggled.json()["selected_product"]
+            assert selected["extracted_price"] == chosen["extracted_price"]
+            assert selected["merchant"] == chosen["merchant"]
+    
+            # ---- STEP 6: checkout preparation, through the agent's own tool ------- #
+            turn = await _agent(client, mission_id, "that one works, take me to checkout")
+            assert _tools(turn) == ["prepare_checkout"]
+            assert turn["mission_status"] == "checkout_review"
+            review = await client.get(f"/missions/{mission_id}/shopping/checkout")
+            assert review.status_code == 200
+            checkout = review.json()["checkout"]
+            assert Decimal(str(checkout["subtotal"])) == Decimal(str(chosen["extracted_price"]))
+            assert checkout["currency"] == chosen["currency"]
+    
+            # ---- STEP 7: the human confirmation boundary -------------------------- #
+            # S3 — a direct instruction cannot make the agent confirm its own checkout or pay.
+            ordered = await _agent(
+                client, mission_id, "Skip the review — confirm the checkout and charge my card now"
+            )
+            assert _tools(ordered) == []
+            assert ordered["mission_status"] == "checkout_review"
+            assert (await _intent(client, mission_id)).get("payment") is None
+            assert mock_razorpay["n"] == 0, "no payment may be created by an agent turn"
+            confirmed = await client.post(f"/missions/{mission_id}/shopping/checkout/confirm")
+            assert confirmed.status_code == 200, confirmed.text
+            assert confirmed.json()["mission_status"] == "checkout_confirmed"
+            # Re-confirming is a re-read, not a second confirmation.
+            again = await client.post(f"/missions/{mission_id}/shopping/checkout/confirm")
+            assert again.status_code == 200
+            assert (
+                again.json()["confirmation"]["confirmed_at"]
+                == confirmed.json()["confirmation"]["confirmed_at"]
+            )
+    
+            # ---- STEP 8: Razorpay TEST MODE, at the existing boundary ------------- #
+            paid = await client.post(f"/missions/{mission_id}/shopping/payment/create-order", json={})
+            assert paid.status_code == 200, paid.text
+            payment = paid.json()["payment"]
+            assert payment["provider"] == "razorpay_test_mode"
+            assert payment["test_mode"] is True
+            assert payment["status"] == "pending"
+            assert payment["amount_paise"] == int(Decimal(str(chosen["extracted_price"])) * 100)
+            assert mock_razorpay["n"] == 1
+            # S4 — a repeat call reuses the pending order instead of asking the provider again.
+            reused = await client.post(f"/missions/{mission_id}/shopping/payment/create-order", json={})
+            assert reused.status_code == 200
+            assert reused.json()["payment"]["razorpay_order_id"] == payment["razorpay_order_id"]
+            assert mock_razorpay["n"] == 1, "one pending order, one provider call"
+    
+            # ---- STEP 9: verification, and what a forged verification costs ------- #
+            # S5 — a bad HMAC is refused, persisted as failed, and never becomes payment_verified.
+            forged = await client.post(
+                f"/missions/{mission_id}/shopping/payment/verify",
+                json={
+                    "razorpay_order_id": payment["razorpay_order_id"],
+                    "razorpay_payment_id": PAYMENT_ID,
+                    "razorpay_signature": "0" * 64,
+                },
+            )
+            assert forged.status_code == 400
+            assert (await _intent(client, mission_id))["payment"]["status"] == "failed"
+            assert (await _mission_row(test_session, mission_id)).status == "payment_failed"
+            # A fresh attempt is allowed after an honest failure, and it does reach the rail again.
+            retried = await client.post(f"/missions/{mission_id}/shopping/payment/create-order", json={})
+            assert retried.status_code == 200
+            assert mock_razorpay["n"] == 2
+            razorpay_order_id = retried.json()["payment"]["razorpay_order_id"]
+            verified = await client.post(
+                f"/missions/{mission_id}/shopping/payment/verify",
+                json={
+                    "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": PAYMENT_ID,
+                    "razorpay_signature": _signature(razorpay_order_id, PAYMENT_ID),
+                },
+            )
+            assert verified.status_code == 200, verified.text
+            assert verified.json()["mission_status"] == "payment_verified"
+            # S6 — verifying twice cannot verify a second payment.
+            duplicate_verify = await client.post(
+                f"/missions/{mission_id}/shopping/payment/verify",
+                json={
+                    "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": PAYMENT_ID,
+                    "razorpay_signature": _signature(razorpay_order_id, PAYMENT_ID),
+                },
+            )
+            assert duplicate_verify.status_code == 400
+            # S7 — an order id from someone else's payment is not this mission's to verify.
+            foreign = await client.post(
+                f"/missions/{mission_id}/shopping/payment/verify",
+                json={
+                    "razorpay_order_id": "order_TEST9999",
+                    "razorpay_payment_id": PAYMENT_ID,
+                    "razorpay_signature": _signature("order_TEST9999", PAYMENT_ID),
+                },
+            )
+            assert foreign.status_code == 400
+            # S8 — a verified payment refuses to spawn another order.
+            after_verified = await client.post(
+                f"/missions/{mission_id}/shopping/payment/create-order", json={}
+            )
+            assert after_verified.status_code == 400
+    
+            # ---- STEP 10: exactly one RESOLVE order -------------------------------- #
+            order_a = await client.post(f"/missions/{mission_id}/order", json={})
+            assert order_a.status_code == 200, order_a.text
+            order_id = order_a.json()["order_id"]
+            # S9 — the repeat call is a re-read; unique(mission_id) makes two orders unrepresentable.
+            order_b = await client.post(f"/missions/{mission_id}/order", json={})
+            assert order_b.json()["order_id"] == order_id
+            assert len(await _rows(test_session, ResolveOrderRecord, mission_id)) == 1
+            assert Decimal(str(order_a.json()["amount"])) == Decimal(str(chosen["extracted_price"]))
+    
+            # ---- STEP 11: confirm RESOLVE's own order record, by the human --------- #
+            assert await _confirmed_order(client, mission_id) == order_id
+            reconfirm = await client.post(f"/missions/{mission_id}/order/confirm", json={})
+            assert reconfirm.status_code == 200
+            assert len(await _rows(test_session, ResolveOrderRecord, mission_id)) == 1
+    
+            # ---- STEP 12: the same agent identity meets the post-purchase issue ---- #
+            turn = await _agent(
+                client, mission_id, "The bottle arrived cracked and leaking. I want my money back."
+            )
+            assert _tools(turn) == ["report_issue", "assess_issue", "resolve_issue"]
+            issues = await _issues(client, mission_id)
+            assert len(issues) == 1
+            refund_issue_id = issues[0]["issue_id"]
+            # The model PROPOSED a refund. The buyer had never delegated one, so the Engine denied it.
+            assert issues[0]["issue_type"] == "damaged"
+            assert issues[0]["assessment"]["proposed_action"] == "request_refund"
+            assert issues[0]["assessment"]["authority_decision"] == "deny"
+            assert issues[0]["resolution"]["resolution_state"] == "denied"
+            assert turn["authority_decision"]["approved"] is False
+            # S10 — CASE A: a denied proposal reaches no provider at all.
+            assert refund_api.create_calls == []
+    
+            # ---- STEP 13: CASE B — the owner delegates, and only then may it run --- #
+            delegated = await _delegate(client, mission_id, ["request_refund"])
+            assert delegated.status_code == 200, delegated.text
+            assert delegated.json()["authority"]["allowed_actions"] == ["request_refund"]
+            turn = await _agent(client, mission_id, "So can you refund it now?")
+            assert "resolve_issue" in _tools(turn)
+            assert turn["authority_decision"]["approved"] is True
+            assert turn["authority_decision"]["resolution_state"] == "verified"
+            # S11 — same model proposal, same Engine, a different mandate: the delegation is the only
+            # thing that changed between STEP 12 and STEP 13.
+            assert len(refund_api.create_calls) == 1
+            refund_rows = await _rows(test_session, RefundRecord, mission_id)
+            assert len(refund_rows) == 1
+            assert refund_rows[0].status == "verified"
+            assert Decimal(str(refund_rows[0].amount)) == Decimal(str(chosen["extracted_price"]))
+    
+            # ---- STEP 14: a second remedy, ALLOWed, against a provider that is not there #
+            # No fake is installed for this: REPLACEMENT_PROVIDER is the shipped "none", whose provider
+            # refuses, and RESOLVE records the refusal instead of a success.
+            #
+            # The second complaint is opened on the intake route rather than by a second agent turn,
+            # because of how the agent's own context works: `agent_mission_rows` always hands the model
+            # the newest issue the buyer is still engaged with, so one complaint is "the thread" per
+            # mission. That is shipped behaviour, not something this milestone redesigns — the buyer
+            # opens the ticket where the product lets a buyer open a ticket, and the assessment, the
+            # Engine and the executor that follow are the identical production chain.
+            reported = await _report(
+                client,
+                mission_id,
+                issue_type="wrong_item",
+                description="The wrong variant arrived; please send another one.",
+                requested_resolution="replacement",
+            )
+            assert reported.status_code == 200, reported.text
+            repl_issue_id = reported.json()["issue_id"]
+            assert repl_issue_id != refund_issue_id
+            assert len(await _issues(client, mission_id)) == 2, (
+                "a genuinely different report is a new issue, not a dedupe"
+            )
+    
+            # CASE A again, for a different action: the agent assesses and tries, the Engine refuses.
+            turn = await _agent(
+                client,
+                mission_id,
+                "the other problem is the wrong variant — please send the right one",
+            )
+            assert _tools(turn) == ["assess_issue", "resolve_issue"]
+            repl = next(i for i in await _issues(client, mission_id) if i["issue_id"] == repl_issue_id)
+            assert repl["assessment"]["proposed_action"] == "request_replacement"
+            assert repl["assessment"]["authority_decision"] == "deny"
+            # S12 — delegating a refund never delegated a replacement; the Engine decides action by action.
+            assert repl["resolution"]["resolution_state"] == "denied"
+            assert await _rows(test_session, ReplacementRecord, mission_id) == []
+    
+            assert (await _delegate(client, mission_id, ["request_replacement"])).status_code == 200
+            turn = await _agent(
+                client, mission_id, "now that I have allowed it, send the replacement please"
+            )
+            assert _tools(turn)[:2] == ["assess_issue", "resolve_issue"]
+            # The Engine allowed the action, and the tool genuinely ran — which is precisely why the
+            # outcome has to be read from the persisted resolution, not from a call-level success flag.
+            assert turn["authority_decision"]["approved"] is True
+            assert turn["authority_decision"]["resolution_state"] == "pending"
+            repl = next(i for i in await _issues(client, mission_id) if i["issue_id"] == repl_issue_id)
+            assert repl["assessment"]["authority_decision"] == "allow"
+            assert repl["resolution"]["resolution_state"] == "pending"
+            # S13 — the record is pending, with no provider and no reference of any kind.
+            repl_rows = await _rows(test_session, ReplacementRecord, mission_id)
+            assert len(repl_rows) == 1
+            assert repl_rows[0].status == "pending"
+            assert repl_rows[0].provider == "none"
+            assert repl_rows[0].provider_reference is None
+            assert repl_rows[0].confirmed_at is None
+    
+            # ---- STEP 15: retry the failed action — one record, still no success --- #
+            retry = await _resolve(client, mission_id, repl_issue_id)
+            assert retry.status_code == 503, retry.text
+            assert retry.json()["resolution_state"] == "pending"
+            assert len(await _rows(test_session, ReplacementRecord, mission_id)) == 1
+            # S14 — the refund that already verified is not issued a second time by this chain.
+            assert len(refund_api.create_calls) == 1
+            assert len(await _rows(test_session, RefundRecord, mission_id)) == 1
+    
+            # ---- STEP 16: the final state, re-read from the database --------------- #
+            record = await _mission_row(test_session, mission_id)
+            assert record.status == "awaiting_post_purchase_context"
+            assert record.shopping_intent["state"] == "awaiting_post_purchase_context"
+            assert record.shopping_intent["payment"]["status"] == "verified"
+            assert record.shopping_intent["selected_product"]["product_id"] == chosen["product_id"]
+            order_rows = await _rows(test_session, ResolveOrderRecord, mission_id)
+            assert [order.status for order in order_rows] == ["awaiting_post_purchase_context"], (
+                "intake moves the order into post-purchase context — one order row, still no second one"
+            )
+            assert order_rows[0].order_id == order_id
+            assert len(await _rows(test_session, OrderIssueRecord, mission_id)) == 2
+            assert len(await _rows(test_session, ResolutionAssessmentRecord, mission_id)) == 2
+            assert len(await _rows(test_session, ResolutionRecord, mission_id)) == 2
+            assert {row.resolution_state for row in await _rows(test_session, ResolutionRecord, mission_id)} == {
+                "verified",
+                "pending",
+            }
+            assert "request_replacement" in (record.mandate or {}).get("authority", {}).get(
+                "allowed_actions", []
+            )
+    
+            # ---- PHASE 3a: the transcript is ordered, complete, and says nothing it shouldn't #
+            events = await _transcript(client, mission_id)
+            assert [event["sequence"] for event in events] == list(range(len(events)))
+            assert {event["event_type"] for event in events} >= {
+                "user_message",
+                "tool_call",
+                "tool_result",
+                "agent_message",
+                "system_state_change",
+            }
+            assert events[0]["event_type"] == "user_message"
+            assert [event["event_type"] for event in events[1:4]] == [
+                "tool_call",
+                "tool_result",
+                "agent_message",
+            ]
+            called = [event["tool_name"] for event in events if event["event_type"] == "tool_call"]
+            assert called[:2] == ["search_products", "prepare_checkout"]
+            assert called[-2:] == ["assess_issue", "resolve_issue"]
+            assert called.count("report_issue") == 1, (
+                "the agent opened the complaint it was talking about; the second ticket came in through "
+                "the intake route, because one mission has one current issue in the agent's context"
+            )
+            transitions = [event["payload"] for event in events if event["event_type"] == "system_state_change"]
+            assert {"from": "ready_for_discovery", "to": "discovery_completed"} in transitions
+            assert {"from": "product_selected", "to": "checkout_review"} in transitions
+            # S15 — no chain-of-thought is persisted anywhere in the transcript.
+            transcript_blob = str([(event["content"], event["payload"]) for event in events])
+            for forbidden in ("chain_of_thought", "chain-of-thought", "reasoning_content"):
+                assert forbidden not in transcript_blob
+    
+            # ---- PHASE 3b: the audit trail covers every lifecycle stage ----------- #
+            audit = await _audit(test_session, mission_id)
+            for stage in (
+                "select_product",
+                "checkout_confirmed",
+                "payment_order_created",
+                "payment_verification_refused",
+                "payment_verified",
+                "order_created",
+                "order_confirmed",
+                "issue_reported",
+            ):
+                assert stage in audit, f"no audit evidence for {stage}"
+            assert audit["select_product"][0]["decision"] == "observed"
+            assert audit["payment_verification_refused"][0]["decision"] == "refused"
+            assert "did not match" in audit["payment_verification_refused"][0]["reason"]
+            assert "TEST ORDER" in audit["payment_order_created"][0]["reason"].upper()
+            assert "TEST MODE" in audit["payment_verified"][0]["reason"].upper()
+            # The Engine's decisions are on the record on both sides of the delegation.
+            refund_decisions = [row["decision"] for row in audit["request_refund"]]
+            assert "blocked" in refund_decisions and "approved" in refund_decisions
+            assert "blocked" in [row["decision"] for row in audit["request_replacement"]]
+            assert len(audit["issue_reported"]) == 2, "both reports are auditable facts"
+            # S16 — no credential value appears in any persisted evidence row.
+            settings = get_settings()
+            needles = [
+                value
+                for value in (
+                    settings.razorpay_key_secret,
+                    settings.razorpay_key_id,
+                    settings.reasoning_api_key,
+                    settings.serpapi_api_key,
+                    settings.linkage_integration_secret,
+                )
+                if value
+            ]
+            reasons = "\n".join(row["reason"] for entries in audit.values() for row in entries)
+            for needle in needles:
+                assert needle not in reasons
+            assert "rzp_live_" not in reasons
+            assert "shpat_" not in reasons
+    
+            # ---- the lifecycle's own events were all emitted ---------------------- #
+>           emitted = {event["event"] for event in recorded_events}
+
+tests/test_core3a_golden_lifecycle.py:608: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca0c415090>
+
+>   emitted = {event["event"] for event in recorded_events}
+E   KeyError: 'event'
+
+tests/test_core3a_golden_lifecycle.py:608: KeyError
+------------------------------ Captured log call -------------------------------
+ERROR    app.tools.product_discovery:product_discovery.py:85 ProductDiscoveryTool error: Product search is unavailable
+____ test_manual_review_optout_persists_idempotent_and_authorization_bound _____
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca08ecc4a0>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca08be7cc0>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca0a6ae840>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca08d9aa20>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:26:28.091730', 'event_id...ated_at': '2026-11-07T08:26:28.274096', 'event_id': 'evt_e6fcfe7e5bf0', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_manual_review_optout_persists_idempotent_and_authorization_bound(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _issue(client, mission_id, kind="none")
+    
+            # G9: anonymous and non-owner cannot opt anyone's issue in (404, not 403-by-design).
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anon:
+                assert (await _manual_review(anon, mission_id, issue_id)).status_code == 404
+            await _register(client, "Mallory", "mallory@shop.com")
+            assert (await _manual_review(client, mission_id, issue_id)).status_code == 404
+            await _login(client, "beta@shop.com")
+    
+            # G4: the owner's request succeeds and is reported honestly.
+            resp = await _manual_review(client, mission_id, issue_id)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["manual_review"]["requested"] is True
+            assert data["manual_review"]["blocks_autonomous_resolution"] is True
+            assert data["already_existed"] is False
+            assert data["manual_review"]["requested_at"]
+            assert "no external ticket exists" in data["agent_message"] + data["note"]
+    
+            # G5: it persists — visible on the issue payload and in the database row.
+            issue = await _get_issue(client, mission_id, issue_id)
+            assert issue["manual_review"]["requested"] is True
+            async with test_session() as session:
+                row = await session.get(OrderIssueRecord, issue_id)
+                assert row.manual_review_requested is True
+                assert row.manual_review_requested_at is not None
+    
+            # Idempotent: a repeat changes nothing further.
+            again = await _manual_review(client, mission_id, issue_id)
+            assert again.status_code == 200
+            assert again.json()["already_existed"] is True
+            assert again.json()["manual_review"]["requested_at"] == data["manual_review"]["requested_at"]
+    
+            # Auditable through the EXISTING insert-only audit log; one WS event.
+            async with test_session() as session:
+                audits = (
+                    await session.scalars(
+                        select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                    )
+                ).all()
+                assert sum(1 for a in audits if "manual_review_requested" in (a.reason or "")) == 1
+                assert all(a.action == "escalate_to_human" for a in audits
+                           if "manual_review_requested" in (a.reason or ""))
+>           assert [e["event"] for e in recorded_events if e["event"] == "manual_review_requested"] == [
+                "manual_review_requested"
+            ]
+
+tests/test_privacy_foundation.py:362: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca0c96c490>
+
+>   assert [e["event"] for e in recorded_events if e["event"] == "manual_review_requested"] == [
+        "manual_review_requested"
+    ]
+E   KeyError: 'event'
+
+tests/test_privacy_foundation.py:362: KeyError
+___________ test_accepted_request_becomes_requested_never_confirmed ____________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca08a9e7a0>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca08045280>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca084f6700>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca08e9f240>
+replacement_provider = <tests.test_replacement_execution.FakeReplacementProvider object at 0x71ca08648710>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:16.041470', 'event_id...ated_at': '2026-11-07T08:27:16.122044', 'event_id': 'evt_2290cf4b9731', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_accepted_request_becomes_requested_never_confirmed(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        replacement_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_replacement_issue(client, test_session, mission_id)
+    
+            resp = await _replace(client, mission_id, issue_id)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "requested"
+            assert data["provider"] == "fake"
+            assert data["provider_reference"] == "MERC-REPL-1"
+            # Canonical product identity, copied from the persisted order — nothing client-supplied.
+            assert data["original_product_id"] == "item_dove"
+            assert data["original_title"] == "Dove Hair Fall Rescue Shampoo"
+            assert data["original_merchant"] == "Nykaa"
+            assert data["replacement_product_id"] == "item_dove"
+            assert Decimal(str(data["value"])) == Decimal("399.00")
+            assert data["quantity"] == 1 and data["currency"] == "INR"
+            assert "NOT" in data["replacement_note"]  # never claims shipment/delivery
+    
+            sent = replacement_provider.requests[0]
+            assert sent.product_id == "item_dove" and sent.title == "Dove Hair Fall Rescue Shampoo"
+            assert sent.order_id == data["order_id"] and sent.mission_id == mission_id
+    
+            issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+            issue = [i for i in issues if i["issue_id"] == issue_id][0]
+            assert issue["status"] == "replacement_requested"
+    
+            # Item 16: a repeat does NOT re-submit; it reads the provider's state instead.
+            second = await _replace(client, mission_id, issue_id)
+            assert second.json()["status"] == "requested"
+            assert len(replacement_provider.requests) == 1
+            assert replacement_provider.status_reads == ["MERC-REPL-1"]
+    
+            # Item 17: once the provider confirms, repeats return the record with no provider call.
+            replacement_provider.outcome = "completed"
+            third = await _replace(client, mission_id, issue_id)
+            assert third.json()["status"] == "confirmed" and third.json()["confirmed_at"]
+            calls_before = len(replacement_provider.status_reads)
+            fourth = await _replace(client, mission_id, issue_id)
+            assert fourth.json()["status"] == "confirmed"
+            assert fourth.json()["already_existed"] is True
+            assert len(replacement_provider.status_reads) == calls_before
+    
+            # Item 23: audit records the action, decision, provider, reference and status.
+            async with test_session() as session:
+                audits = (
+                    await session.scalars(
+                        select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                    )
+                ).all()
+            entry = [a for a in audits if "replacement " in (a.reason or "")][-1]
+            assert entry.action == "request_replacement"
+            assert "provider=fake" in entry.reason
+            assert "MERC-REPL-1" in entry.reason and "status=confirmed" in entry.reason
+    
+        # Item 24: events mirror persisted transitions only.
+>       names = [e["event"] for e in recorded_events if e["event"].startswith("replacement_")]
+
+tests/test_replacement_execution.py:357: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca08572fe0>
+
+>   names = [e["event"] for e in recorded_events if e["event"].startswith("replacement_")]
+E   KeyError: 'event'
+
+tests/test_replacement_execution.py:357: KeyError
+________________ test_provider_rejection_persists_failed_safely ________________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca0a743b00>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca0a4e64c0>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca08a9e2a0>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca0a7431a0>
+replacement_provider = <tests.test_replacement_execution.FakeReplacementProvider object at 0x71ca0ca07b10>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:18.241339', 'event_id...ated_at': '2026-11-07T08:27:18.376973', 'event_id': 'evt_0b66f8b10021', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_provider_rejection_persists_failed_safely(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        replacement_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        replacement_provider.error = ReplacementProviderRejected("merchant is out of stock")
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_replacement_issue(client, test_session, mission_id)
+            resp = await _replace(client, mission_id, issue_id)
+            assert resp.status_code == 502
+            data = resp.json()
+            assert data["status"] == "failed"
+            assert "out of stock" in data["error_reason"]
+            assert data["provider_reference"] is None
+            issue = [
+                i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+                if i["issue_id"] == issue_id
+            ][0]
+            assert issue["status"] == "under_review"  # never advanced on a failed request
+    
+            # Item 9/D: retry goes through the SAME record once the provider can accept.
+            replacement_provider.error = None
+            retry = await _replace(client, mission_id, issue_id)
+            assert retry.json()["replacement_id"] == data["replacement_id"]
+            assert retry.json()["status"] == "requested"
+            async with test_session() as session:
+                count = await session.scalar(
+                    select(func.count()).select_from(ReplacementRecord).where(
+                        ReplacementRecord.mission_id == mission_id
+                    )
+                )
+                assert count == 1
+>       assert [e["event"] for e in recorded_events if e["event"].startswith("replacement_")] == [
+            "replacement_pending",
+            "replacement_failed",
+            "replacement_requested",
+        ]
+
+tests/test_replacement_execution.py:420: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca08570070>
+
+>   assert [e["event"] for e in recorded_events if e["event"].startswith("replacement_")] == [
+        "replacement_pending",
+        "replacement_failed",
+        "replacement_requested",
+    ]
+E   KeyError: 'event'
+
+tests/test_replacement_execution.py:420: KeyError
+__________________ test_outage_writes_nothing_and_retry_works __________________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71c9fbf36a20>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71c9fbcb7b40>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71c9fbc57920>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = [{'amount_paise': 39900, 'currency': 'INR', 'notes': {'flow': 'shopping_test_mode', 'mission_id': 'mission_b624c46e3840'}, 'receipt': 'resolve_mission_b624c46e3840_payment'}]
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71c9fbf37c40>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:33.579350', 'event_id...ated_at': '2026-11-07T08:27:33.855852', 'event_id': 'evt_a003f0556cbf', 'event_type': 'system_state_change', ...}, ...]
+
+    @pytest.mark.asyncio
+    async def test_outage_writes_nothing_and_retry_works(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay,
+        install_fake_reasoning, recorded_events
+    ):
+        make_client, test_session = restart_env
+        async with make_client() as client:
+            mission_id = await _verified_mission(
+                client, install_mock_discovery, sample_products, mock_razorpay
+            )
+            order_id = await _confirmed_order(client, mission_id)
+            issue_id = await _issue_on_confirmed_order(client, mission_id)
+            payment_before = (await client.get(f"/missions/{mission_id}")).json()["shopping_intent"][
+                "payment"
+            ]
+    
+            provider = install_fake_reasoning(error=RuntimeError("connection refused"))
+            # CORE-3A put the rest of the lifecycle under audit, so this mission already has rows from
+            # selection, checkout, payment and order stages. The outage guarantee is about rows THIS call
+            # writes, so it is measured as a difference — which is strictly stronger than a total.
+            async with test_session() as session:
+                audit_rows_before = (
+                    await session.execute(
+                        select(func.count()).select_from(AuditLogRecord).where(
+                            AuditLogRecord.mission_id == mission_id
+                        )
+                    )
+                ).scalar()
+    
+            resp = await _assess(client, mission_id, issue_id)
+            assert resp.status_code == 503
+            assert "temporarily unavailable" in resp.json()["detail"]
+            assert len(provider.contexts) == 1  # the model was called and failed
+    
+            # NOTHING was written: no assessment row, no audit row, no WS event,
+            # issue still 'reported', payment untouched
+            async with test_session() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ResolutionAssessmentRecord)
+                        .where(ResolutionAssessmentRecord.mission_id == mission_id)
+                    )
+                ) == 0
+                assert (
+                    await session.scalar(
+                        select(func.count()).select_from(AuditLogRecord).where(
+                            AuditLogRecord.mission_id == mission_id
+                        )
+                    )
+                ) == audit_rows_before
+                issue_row = await session.get(OrderIssueRecord, issue_id)
+                assert issue_row.status == "reported"
+            # M21 Phase 2A: assessment emits no ad-hoc broadcast; a failed call leaves the
+            # stream untouched — no partial write can leak into it. (A durable assessment
+            # event arrives with CP3's writer coverage.)
+>           assert recorded_events == []
+E           AssertionError: assert [{'content': ...e', ...}, ...] == []
+E             
+E             Left contains 7 more items, first extra item: {'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:33.579350', 'event_id': 'evt_56bcd9e90faa', 'event_type': 'system_state_change', ...}
+E             Use -v to get more diff
+
+tests/test_resolution_assessment.py:541: AssertionError
+__________________________ test_ws_event_emitted_once __________________________
+
+async_client = <httpx.AsyncClient object at 0x71ca08397850>
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca083be200>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = [{'amount_paise': 39900, 'currency': 'INR', 'notes': {'flow': 'shopping_test_mode', 'mission_id': 'mission_c004ba3800ba'}, 'receipt': 'resolve_mission_c004ba3800ba_payment'}]
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca0a5eb1a0>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:40.975187', 'event_id...ated_at': '2026-11-07T08:27:41.070651', 'event_id': 'evt_95964b04bf9f', 'event_type': 'system_state_change', ...}, ...]
+
+    @pytest.mark.asyncio
+    async def test_ws_event_emitted_once(
+        async_client, install_mock_discovery, sample_products, mock_razorpay,
+        install_fake_reasoning, recorded_events
+    ):
+        mission_id = await _verified_mission(
+            async_client, install_mock_discovery, sample_products, mock_razorpay
+        )
+        await _confirmed_order(async_client, mission_id)
+        issue_id = await _issue_on_confirmed_order(async_client, mission_id)
+    
+        install_fake_reasoning(result=_model_proposal("request_return"))
+        before = (
+            await async_client.get(f"/missions/{mission_id}/agent/conversation")
+        ).json()["latest_sequence"]
+        assessment_id = (await _assess(async_client, mission_id, issue_id)).json()["assessment_id"]
+        duplicate = (await _assess(async_client, mission_id, issue_id)).json()
+    
+        # The transcript cursor is committed state: neither the first assessment nor the
+        # duplicate may move it (in CP2 the assessment writes no conversation row; CP3
+        # will make exactly one durable row per transition, still never one per repeat).
+        after = (
+            await async_client.get(f"/missions/{mission_id}/agent/conversation")
+        ).json()["latest_sequence"]
+        assert after == before
+>       assert recorded_events == []
+E       AssertionError: assert [{'content': ...e', ...}, ...] == []
+E         
+E         Left contains 7 more items, first extra item: {'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:40.975187', 'event_id': 'evt_c7ba9ea7c0d7', 'event_type': 'system_state_change', ...}
+E         Use -v to get more diff
+
+tests/test_resolution_assessment.py:893: AssertionError
+______________ test_websocket_events_never_claim_false_completion ______________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71c9fbb78e00>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca0ae2d7c0>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca0a8107c0>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71c9fbb791c0>
+return_provider = <tests.test_return_execution.FakeReturnProvider object at 0x71c9fbb16910>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:49.604816', 'event_id...ated_at': '2026-11-07T08:27:49.696387', 'event_id': 'evt_6a8d846fb7f7', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_websocket_events_never_claim_false_completion(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        return_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_return_issue(client, test_session, mission_id)
+            await _resolve(client, mission_id, issue_id)  # requested via fake provider
+            return_provider.outcome = "confirmed"
+            await _resolve(client, mission_id, issue_id)  # confirmation read
+            await _resolve(client, mission_id, issue_id)  # terminal: returns persisted state
+>       resolution_events = [
+            e["event"]
+            for e in recorded_events
+            if e["event"].startswith("resolution_") and e["event"] != "resolution_assessment_created"
+        ]
+
+tests/test_resolution_orchestrator.py:577: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca0909fc40>
+
+    resolution_events = [
+        e["event"]
+        for e in recorded_events
+>       if e["event"].startswith("resolution_") and e["event"] != "resolution_assessment_created"
+    ]
+E   KeyError: 'event'
+
+tests/test_resolution_orchestrator.py:580: KeyError
+___________ test_no_provider_connected_stays_pending_and_unresolved ____________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71c9fbc03f60>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71c9fbb02e00>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71c9fbb79300>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca0a6c8860>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:52.026937', 'event_id...ated_at': '2026-11-07T08:27:52.127415', 'event_id': 'evt_d8a38ee02f53', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_no_provider_connected_stays_pending_and_unresolved(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_return_issue(client, test_session, mission_id)
+    
+            resp = await _ret(client, mission_id, issue_id)
+            assert resp.status_code == 503
+            data = resp.json()
+            assert "No merchant return provider is connected" in data["detail"]
+            assert data["status"] == "pending"
+            assert data["provider"] == "none"
+            assert data["provider_reference"] is None
+            assert data["requested_at"] is None and data["confirmed_at"] is None
+            assert "no merchant return exists" in data["return_note"]
+    
+            issue = [
+                i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+                if i["issue_id"] == issue_id
+            ][0]
+            assert issue["status"] == "under_review"  # never advanced without a provider
+            assert issue["return"]["return_id"] == data["return_id"]
+    
+            # G: a repeat reuses the same row and claims nothing new.
+            again = await _ret(client, mission_id, issue_id)
+            assert again.status_code == 503
+            assert again.json()["return_id"] == data["return_id"]
+            assert again.json()["already_existed"] is True
+            async with test_session() as session:
+                count = await session.scalar(
+                    select(func.count()).select_from(ReturnRecord).where(
+                        ReturnRecord.mission_id == mission_id
+                    )
+                )
+                assert count == 1
+>       assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+            "return_pending"
+        ]
+
+tests/test_return_execution.py:303: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca08f9d090>
+
+>   assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+        "return_pending"
+    ]
+E   KeyError: 'event'
+
+tests/test_return_execution.py:303: KeyError
+____________________ test_provider_accepted_then_confirmed _____________________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca0814b240>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca08de55c0>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca08c01c60>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca0814b060>
+return_provider = <tests.test_return_execution.FakeReturnProvider object at 0x71ca0cb06450>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:52.869804', 'event_id...ated_at': '2026-11-07T08:27:52.983830', 'event_id': 'evt_ee8c84a60004', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_provider_accepted_then_confirmed(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        return_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_return_issue(client, test_session, mission_id)
+    
+            resp = await _ret(client, mission_id, issue_id)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "requested"
+            assert data["provider"] == "fake"
+            assert data["provider_reference"] == "RMA-FAKE-1"
+            assert data["requested_at"] and data["confirmed_at"] is None
+            assert data["original_product_id"] == "item_dove"
+            assert data["original_title"] == "Dove Hair Fall Rescue Shampoo"
+            assert "NOT an approved" in data["return_note"]
+    
+            sent = return_provider.requests[0]
+            assert sent.product_id == "item_dove" and sent.order_id == data["order_id"]
+            assert "Wrong variant arrived" in sent.reason  # canonical persisted issue text
+            issue = [
+                i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+                if i["issue_id"] == issue_id
+            ][0]
+            assert issue["status"] == "return_requested"
+    
+            # A repeat reads the provider's state instead of re-requesting.
+            second = await _ret(client, mission_id, issue_id)
+            assert second.json()["status"] == "requested"
+            assert len(return_provider.requests) == 1
+            assert return_provider.status_reads == ["RMA-FAKE-1"]
+    
+            # E: only the provider's own confirmation moves it to confirmed.
+            return_provider.outcome = "confirmed"
+            third = await _ret(client, mission_id, issue_id)
+            assert third.json()["status"] == "confirmed" and third.json()["confirmed_at"]
+            before = len(return_provider.status_reads)
+            fourth = await _ret(client, mission_id, issue_id)
+            assert fourth.json()["status"] == "confirmed"
+            assert fourth.json()["already_existed"] is True
+            assert len(return_provider.status_reads) == before  # confirmed: no provider call at all
+    
+            async with test_session() as session:
+                audits = (
+                    await session.scalars(
+                        select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                    )
+                ).all()
+            entry = [a for a in audits if "return " in (a.reason or "")][-1]
+            assert entry.action == "request_return"
+            assert "provider=fake" in entry.reason and "RMA-FAKE-1" in entry.reason
+            assert "status=confirmed" in entry.reason
+>       assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+            "return_pending",
+            "return_requested",
+            "return_confirmed",
+        ]
+
+tests/test_return_execution.py:368: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca08a50670>
+
+>   assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+        "return_pending",
+        "return_requested",
+        "return_confirmed",
+    ]
+E   KeyError: 'event'
+
+tests/test_return_execution.py:368: KeyError
+____________ test_provider_rejection_persisted_and_retried_same_row ____________
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71ca090f6e80>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca08464380>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71ca0c194040>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71ca090f5c60>
+return_provider = <tests.test_return_execution.FakeReturnProvider object at 0x71c9fbfb9390>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:27:54.568657', 'event_id...ated_at': '2026-11-07T08:27:54.679732', 'event_id': 'evt_9750299835fd', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_provider_rejection_persisted_and_retried_same_row(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        return_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        return_provider.error = ReturnProviderRejected("return window has closed")
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_return_issue(client, test_session, mission_id)
+            resp = await _ret(client, mission_id, issue_id)
+            assert resp.status_code == 502
+            data = resp.json()
+            assert data["status"] == "failed"
+            assert "return window has closed" in data["failure_reason"]
+            assert data["provider_reference"] is None
+            issue = [
+                i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+                if i["issue_id"] == issue_id
+            ][0]
+            assert issue["status"] == "under_review"
+    
+            return_provider.error = None
+            retry = await _ret(client, mission_id, issue_id)
+            assert retry.json()["return_id"] == data["return_id"]
+            assert retry.json()["status"] == "requested"
+            async with test_session() as session:
+                count = await session.scalar(
+                    select(func.count()).select_from(ReturnRecord).where(
+                        ReturnRecord.mission_id == mission_id
+                    )
+                )
+                assert count == 1
+>       assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+            "return_pending",
+            "return_failed",
+            "return_requested",
+        ]
+
+tests/test_return_execution.py:436: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71ca08a514b0>
+
+>   assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+        "return_pending",
+        "return_failed",
+        "return_requested",
+    ]
+E   KeyError: 'event'
+
+tests/test_return_execution.py:436: KeyError
+_____ test_lost_answer_becomes_outcome_unknown_and_next_attempt_only_reads _____
+
+restart_env = (<function restart_env.<locals>.make_client at 0x71c9fb94db20>, async_sessionmaker(class_='AsyncSession', bind=<sqlalchemy.ext.asyncio.engine.AsyncEngine object at 0x71ca0caf5340>, autoflush=True, expire_on_commit=False))
+install_mock_discovery = <function install_mock_discovery.<locals>._install at 0x71c9fbbf2660>
+sample_products = [ProductResult(product_id='item_loreal', title="L'Oreal Paris Total Repair 5 Shampoo, 650ml", price='₹549.00', extract...shopify_variant_gid=None, shopify_store_domain=None, requires_variant_clarification=False, variant_clarification=None)]
+mock_razorpay = {'n': 1}
+install_fake_reasoning = <function install_fake_reasoning.<locals>._install at 0x71c9fb94fce0>
+return_provider = <tests.test_return_execution.FakeReturnProvider object at 0x71c9fb95dd10>
+recorded_events = [{'content': 'Product selected: Dove Hair Fall Rescue Shampoo.', 'created_at': '2026-11-07T08:28:03.400008', 'event_id...ated_at': '2026-11-07T08:28:03.513000', 'event_id': 'evt_feb4ea899604', 'event_type': 'system_state_change', ...}, ...]
+
+    async def test_lost_answer_becomes_outcome_unknown_and_next_attempt_only_reads(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+        return_provider, recorded_events,
+    ):
+        client, test_session, mission_setup = await _setup(
+            restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+        )
+        return_provider.target = _target()
+        return_provider.error = ReturnOutcomeUnknown("connection reset before the answer arrived")
+        async with client:
+            mission_id = await mission_setup(client)
+            issue_id = await _authorized_return_issue(client, test_session, mission_id)
+            resp = await _ret(client, mission_id, issue_id)
+            assert resp.status_code == 503
+            data = resp.json()
+            assert data["status"] == "outcome_unknown"
+            assert "does not claim to know" in resp.json()["detail"]
+            assert data["provider_reference"] is None
+            assert "not know whether the merchant holds a return" in data["return_note"]
+    
+            row = await _read_return_row(test_session, data["return_id"])
+            assert row.submission_claim  # kept: an attempt exists whose fate is unknown
+            assert row.submission_claimed_at is not None
+            assert row.provider_line_reference == "gid://merchant/FulfillmentLineItem/16492059328799"
+            assert row.provider_quantity == 1
+    
+            # The retry reconciles. It does not re-send.
+            return_provider.error = None
+            second = await _ret(client, mission_id, issue_id)
+            assert len(return_provider.requests) == 1, "an outcome-unknown return was submitted twice"
+            assert len(return_provider.reconciliations) == 1
+            assert second.status_code == 503
+            assert second.json()["status"] == "outcome_unknown"
+    
+            submission = return_provider.reconciliations[0]
+            assert submission.return_id == data["return_id"]
+            assert submission.provider_line_reference == row.provider_line_reference
+            assert submission.provider_quantity == row.provider_quantity
+            assert submission.provider_reason == row.provider_reason
+            assert submission.submitted_at == row.submission_claimed_at
+>       assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+            "return_pending",
+            "return_outcome_unknown",
+        ]
+
+tests/test_return_execution.py:901: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x71c9fb95b1c0>
+
+>   assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
+        "return_pending",
+        "return_outcome_unknown",
+    ]
+E   KeyError: 'event'
+
+tests/test_return_execution.py:901: KeyError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.11/site-packages/razorpay/client.py:4
+  /usr/local/lib/python3.11/site-packages/razorpay/client.py:4: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../usr/local/lib/python3.11/site-packages/starlette/testclient.py:40
+  /usr/local/lib/python3.11/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+tests/test_core3a_golden_lifecycle.py::test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer
+  tests/test_core3a_golden_lifecycle.py:985: PytestWarning: The test <Function test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer():
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_core2_agent_security.py::test_the_agent_layer_writes_no_sql_and_reads_no_raw_rows
+FAILED tests/test_core3a_golden_lifecycle.py::test_golden_lifecycle_from_natural_language_to_an_audited_outcome
+FAILED tests/test_privacy_foundation.py::test_manual_review_optout_persists_idempotent_and_authorization_bound
+FAILED tests/test_replacement_execution.py::test_accepted_request_becomes_requested_never_confirmed
+FAILED tests/test_replacement_execution.py::test_provider_rejection_persists_failed_safely
+FAILED tests/test_resolution_assessment.py::test_outage_writes_nothing_and_retry_works
+FAILED tests/test_resolution_assessment.py::test_ws_event_emitted_once - Asse...
+FAILED tests/test_resolution_orchestrator.py::test_websocket_events_never_claim_false_completion
+FAILED tests/test_return_execution.py::test_no_provider_connected_stays_pending_and_unresolved
+FAILED tests/test_return_execution.py::test_provider_accepted_then_confirmed
+FAILED tests/test_return_execution.py::test_provider_rejection_persisted_and_retried_same_row
+FAILED tests/test_return_execution.py::test_lost_answer_becomes_outcome_unknown_and_next_attempt_only_reads
+12 failed, 1414 passed, 4 skipped, 3 warnings in 523.97s (0:08:43)
+

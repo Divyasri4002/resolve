@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+*.env
+**/.env
+**/*.env
+backend/.env
+frontend/.env*
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node artifacts
+node_modules/
+.next/
+
+# Version control & IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+

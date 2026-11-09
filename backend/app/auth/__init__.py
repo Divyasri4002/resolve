@@ -1,0 +1,4 @@
+"""
+Authentication module for RESOLVE.
+"""
+

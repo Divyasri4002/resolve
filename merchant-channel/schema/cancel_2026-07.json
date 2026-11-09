@@ -1,0 +1,581 @@
+{
+  "api_version": "2026-07",
+  "candidate_operation_names": [
+    "appSubscriptionCancel",
+    "articleDelete",
+    "blogDelete",
+    "bulkOperationCancel",
+    "carrierServiceDelete",
+    "cartTransformDelete",
+    "cashManagementReasonCodeDelete",
+    "catalogDelete",
+    "channelDelete",
+    "collectionConditionsSourceDelete",
+    "collectionDelete",
+    "commentDelete",
+    "companiesDelete",
+    "companyAddressDelete",
+    "companyContactDelete",
+    "companyContactsDelete",
+    "companyDelete",
+    "companyLocationDelete",
+    "companyLocationsDelete",
+    "customerAddressDelete",
+    "customerCancelDataErasure",
+    "customerDelete",
+    "deliveryCustomizationDelete",
+    "discountAutomaticBulkDelete",
+    "discountAutomaticDelete",
+    "discountCodeBulkDelete",
+    "discountCodeDelete",
+    "discountCodeRedeemCodeBulkDelete",
+    "draftOrderBulkDelete",
+    "draftOrderDelete",
+    "fileDelete",
+    "fulfillmentCancel",
+    "fulfillmentConstraintRuleDelete",
+    "fulfillmentOrderAcceptCancellationRequest",
+    "fulfillmentOrderCancel",
+    "fulfillmentOrderClose",
+    "fulfillmentOrderRejectCancellationRequest",
+    "fulfillmentOrderSubmitCancellationRequest",
+    "fulfillmentServiceDelete",
+    "inventoryShipmentDelete",
+    "inventoryTransferCancel",
+    "inventoryTransferDelete",
+    "locationDelete",
+    "marketDelete",
+    "marketingActivitiesDeleteAllExternal",
+    "marketingActivityDeleteExternal",
+    "marketingEngagementsDelete",
+    "menuDelete",
+    "metafieldDefinitionDelete",
+    "metafieldsDelete",
+    "metaobjectBulkDelete",
+    "metaobjectDefinitionDelete",
+    "metaobjectDelete",
+    "mobilePlatformApplicationDelete",
+    "orderAttributionDefinitionDelete",
+    "orderCancel",
+    "orderClose",
+    "orderDelete",
+    "pageDelete",
+    "paymentCustomizationDelete",
+    "paymentTermsDelete",
+    "pointOfSaleDevicePaymentSessionClose",
+    "priceListDelete",
+    "priceListFixedPricesDelete",
+    "productDelete",
+    "productFeedDelete",
+    "productOptionsDelete",
+    "productVariantsBulkDelete",
+    "publicationDelete",
+    "quantityRulesDelete",
+    "refundCreate",
+    "returnCancel",
+    "returnClose",
+    "reverseFulfillmentOrderDispose",
+    "savedSearchDelete",
+    "scriptTagDelete",
+    "segmentDelete",
+    "sellingPlanGroupDelete",
+    "serverPixelDelete",
+    "shippingPackageDelete",
+    "storefrontAccessTokenDelete",
+    "subscriptionBillingCycleEditDelete",
+    "subscriptionBillingCycleEditsDelete",
+    "subscriptionContractCancel",
+    "themeDelete",
+    "themeFilesDelete",
+    "transactionVoid",
+    "urlRedirectBulkDeleteAll",
+    "urlRedirectBulkDeleteByIds",
+    "urlRedirectBulkDeleteBySavedSearch",
+    "urlRedirectBulkDeleteBySearch",
+    "urlRedirectDelete",
+    "validationDelete",
+    "webPixelDelete",
+    "webPresenceDelete",
+    "webhookSubscriptionDelete"
+  ],
+  "credential_fields_included": false,
+  "deprecations": [
+    "none of the order/draft-order disposal-shaped operations is deprecated"
+  ],
+  "display_financial_status": "UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+  "documents_sent": {
+    "count": 24,
+    "kinds": [
+      "query"
+    ]
+  },
+  "draft_order_applicability": "names it as a type: none; names a type composed on it (e.g. an input/payload object): [\"draftOrderDelete\"]; takes an argument named for it: none \u2014 structural only; whether any call is valid at a given point in the object's lifecycle is UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+  "enums": {
+    "DisplayFinancialStatus": {
+      "present": false
+    },
+    "OrderCancelReason": {
+      "deprecated_values": [],
+      "kind": "ENUM",
+      "present": true,
+      "values": [
+        "CUSTOMER",
+        "DECLINED",
+        "FRAUD",
+        "INVENTORY",
+        "OTHER",
+        "STAFF"
+      ]
+    },
+    "OrderFinancialStatus": {
+      "present": false
+    }
+  },
+  "inputs": [
+    {
+      "fields": {
+        "id": "ID!"
+      },
+      "kind": "INPUT_OBJECT",
+      "name": "DraftOrderDeleteInput",
+      "present": true
+    },
+    {
+      "name": "OrderCancelInput",
+      "present": false
+    },
+    {
+      "fields": {
+        "originalPaymentMethodsRefund": "Boolean",
+        "storeCreditRefund": "OrderCancelStoreCreditRefundInput"
+      },
+      "kind": "INPUT_OBJECT",
+      "name": "OrderCancelRefundMethodInput",
+      "present": true
+    },
+    {
+      "fields": {
+        "id": "ID!"
+      },
+      "kind": "INPUT_OBJECT",
+      "name": "OrderCloseInput",
+      "present": true
+    },
+    {
+      "fields": {
+        "dispositionType": "ReverseFulfillmentOrderDispositionType!",
+        "locationId": "ID",
+        "quantity": "Int!",
+        "reverseFulfillmentOrderLineItemId": "ID!"
+      },
+      "kind": "INPUT_OBJECT",
+      "name": "ReverseFulfillmentOrderDisposeInput",
+      "present": true
+    }
+  ],
+  "mutation_operation_count_total": 470,
+  "objects": {
+    "DraftOrder": {
+      "cancellation_markers_present": {
+        "cancelReason": false,
+        "cancelledAt": false,
+        "closedAt": false,
+        "currentTotalDimensions": false,
+        "displayFinancialStatus": false,
+        "totalOutstanding": false
+      },
+      "draft_order_has_order_field": true,
+      "has_id_field": true,
+      "present": true
+    },
+    "Order": {
+      "cancellation_markers_present": {
+        "cancelReason": true,
+        "cancelledAt": true,
+        "closedAt": true,
+        "currentTotalDimensions": false,
+        "displayFinancialStatus": true,
+        "totalOutstanding": false
+      },
+      "draft_order_has_order_field": null,
+      "has_id_field": true,
+      "present": true
+    }
+  },
+  "operations": [
+    {
+      "addresses_types": [
+        "ID",
+        "Job",
+        "String",
+        "UserError"
+      ],
+      "arguments": {
+        "ids": "[ID!]",
+        "savedSearchId": "ID",
+        "search": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "draftOrderBulkDelete",
+      "payload_fields": {
+        "job": "Job",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "DraftOrderBulkDeletePayload"
+    },
+    {
+      "addresses_types": [
+        "DraftOrderDeleteInput",
+        "ID",
+        "UserError"
+      ],
+      "arguments": {
+        "input": "DraftOrderDeleteInput!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "draftOrderDelete",
+      "payload_fields": {
+        "deletedId": "ID",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "DraftOrderDeletePayload"
+    },
+    {
+      "addresses_types": [
+        "FulfillmentOrder",
+        "ID",
+        "String",
+        "UserError"
+      ],
+      "arguments": {
+        "id": "ID!",
+        "message": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "fulfillmentOrderAcceptCancellationRequest",
+      "payload_fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "FulfillmentOrderAcceptCancellationRequestPayload"
+    },
+    {
+      "addresses_types": [
+        "FulfillmentOrder",
+        "FulfillmentOrderCancelError",
+        "ID"
+      ],
+      "arguments": {
+        "id": "ID!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "fulfillmentOrderCancel",
+      "payload_fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "replacementFulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[FulfillmentOrderCancelError!]!"
+      },
+      "returns": "FulfillmentOrderCancelPayload"
+    },
+    {
+      "addresses_types": [
+        "FulfillmentOrder",
+        "ID",
+        "String",
+        "UserError"
+      ],
+      "arguments": {
+        "id": "ID!",
+        "message": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "fulfillmentOrderClose",
+      "payload_fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "FulfillmentOrderClosePayload"
+    },
+    {
+      "addresses_types": [
+        "FulfillmentOrder",
+        "ID",
+        "String",
+        "UserError"
+      ],
+      "arguments": {
+        "id": "ID!",
+        "message": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "fulfillmentOrderRejectCancellationRequest",
+      "payload_fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "FulfillmentOrderRejectCancellationRequestPayload"
+    },
+    {
+      "addresses_types": [
+        "FulfillmentOrder",
+        "ID",
+        "String",
+        "UserError"
+      ],
+      "arguments": {
+        "id": "ID!",
+        "message": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "fulfillmentOrderSubmitCancellationRequest",
+      "payload_fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "FulfillmentOrderSubmitCancellationRequestPayload"
+    },
+    {
+      "addresses_types": [
+        "ID",
+        "OrderAttributionDefinitionDeleteUserError"
+      ],
+      "arguments": {
+        "id": "ID!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "orderAttributionDefinitionDelete",
+      "payload_fields": {
+        "deletedId": "ID",
+        "userErrors": "[OrderAttributionDefinitionDeleteUserError!]!"
+      },
+      "returns": "OrderAttributionDefinitionDeletePayload"
+    },
+    {
+      "addresses_types": [
+        "Boolean",
+        "ID",
+        "Job",
+        "OrderCancelReason",
+        "OrderCancelRefundMethodInput",
+        "OrderCancelUserError",
+        "String"
+      ],
+      "arguments": {
+        "notifyCustomer": "Boolean",
+        "orderId": "ID!",
+        "reason": "OrderCancelReason!",
+        "refundMethod": "OrderCancelRefundMethodInput",
+        "restock": "Boolean!",
+        "staffNote": "String"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "orderCancel",
+      "payload_fields": {
+        "job": "Job",
+        "orderCancelUserErrors": "[OrderCancelUserError!]!"
+      },
+      "returns": "OrderCancelPayload"
+    },
+    {
+      "addresses_types": [
+        "Order",
+        "OrderCloseInput",
+        "UserError"
+      ],
+      "arguments": {
+        "input": "OrderCloseInput!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "orderClose",
+      "payload_fields": {
+        "order": "Order",
+        "userErrors": "[UserError!]!"
+      },
+      "returns": "OrderClosePayload"
+    },
+    {
+      "addresses_types": [
+        "ID",
+        "OrderDeleteUserError"
+      ],
+      "arguments": {
+        "orderId": "ID!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "orderDelete",
+      "payload_fields": {
+        "deletedId": "ID",
+        "userErrors": "[OrderDeleteUserError!]!"
+      },
+      "returns": "OrderDeletePayload"
+    },
+    {
+      "addresses_types": [
+        "ReturnUserError",
+        "ReverseFulfillmentOrderDisposeInput",
+        "ReverseFulfillmentOrderLineItem"
+      ],
+      "arguments": {
+        "dispositionInputs": "[ReverseFulfillmentOrderDisposeInput!]!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "reverseFulfillmentOrderDispose",
+      "payload_fields": {
+        "reverseFulfillmentOrderLineItems": "[ReverseFulfillmentOrderLineItem!]",
+        "userErrors": "[ReturnUserError!]!"
+      },
+      "returns": "ReverseFulfillmentOrderDisposePayload"
+    },
+    {
+      "addresses_types": [
+        "ID",
+        "OrderTransaction",
+        "TransactionVoidUserError"
+      ],
+      "arguments": {
+        "parentTransactionId": "ID!"
+      },
+      "deprecated": false,
+      "deprecation_reason": null,
+      "operation": "transactionVoid",
+      "payload_fields": {
+        "transaction": "OrderTransaction",
+        "userErrors": "[TransactionVoidUserError!]!"
+      },
+      "returns": "TransactionVoidPayload"
+    }
+  ],
+  "order_applicability": "names it as a type: [\"orderClose\"]; names a type composed on it (e.g. an input/payload object): [\"orderAttributionDefinitionDelete\", \"orderCancel\", \"orderClose\", \"orderDelete\", \"transactionVoid\"]; takes an argument named for it: [\"orderCancel\", \"orderDelete\"] \u2014 structural only; whether any call is valid at a given point in the object's lifecycle is UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+  "payloads": [
+    {
+      "fields": {
+        "job": "Job",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "draftOrderBulkDelete",
+      "payload_type": "DraftOrderBulkDeletePayload"
+    },
+    {
+      "fields": {
+        "deletedId": "ID",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "draftOrderDelete",
+      "payload_type": "DraftOrderDeletePayload"
+    },
+    {
+      "fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "fulfillmentOrderAcceptCancellationRequest",
+      "payload_type": "FulfillmentOrderAcceptCancellationRequestPayload"
+    },
+    {
+      "fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "replacementFulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[FulfillmentOrderCancelError!]!"
+      },
+      "operation": "fulfillmentOrderCancel",
+      "payload_type": "FulfillmentOrderCancelPayload"
+    },
+    {
+      "fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "fulfillmentOrderClose",
+      "payload_type": "FulfillmentOrderClosePayload"
+    },
+    {
+      "fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "fulfillmentOrderRejectCancellationRequest",
+      "payload_type": "FulfillmentOrderRejectCancellationRequestPayload"
+    },
+    {
+      "fields": {
+        "fulfillmentOrder": "FulfillmentOrder",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "fulfillmentOrderSubmitCancellationRequest",
+      "payload_type": "FulfillmentOrderSubmitCancellationRequestPayload"
+    },
+    {
+      "fields": {
+        "deletedId": "ID",
+        "userErrors": "[OrderAttributionDefinitionDeleteUserError!]!"
+      },
+      "operation": "orderAttributionDefinitionDelete",
+      "payload_type": "OrderAttributionDefinitionDeletePayload"
+    },
+    {
+      "fields": {
+        "job": "Job",
+        "orderCancelUserErrors": "[OrderCancelUserError!]!"
+      },
+      "operation": "orderCancel",
+      "payload_type": "OrderCancelPayload"
+    },
+    {
+      "fields": {
+        "order": "Order",
+        "userErrors": "[UserError!]!"
+      },
+      "operation": "orderClose",
+      "payload_type": "OrderClosePayload"
+    },
+    {
+      "fields": {
+        "deletedId": "ID",
+        "userErrors": "[OrderDeleteUserError!]!"
+      },
+      "operation": "orderDelete",
+      "payload_type": "OrderDeletePayload"
+    },
+    {
+      "fields": {
+        "reverseFulfillmentOrderLineItems": "[ReverseFulfillmentOrderLineItem!]",
+        "userErrors": "[ReturnUserError!]!"
+      },
+      "operation": "reverseFulfillmentOrderDispose",
+      "payload_type": "ReverseFulfillmentOrderDisposePayload"
+    },
+    {
+      "fields": {
+        "transaction": "OrderTransaction",
+        "userErrors": "[TransactionVoidUserError!]!"
+      },
+      "operation": "transactionVoid",
+      "payload_type": "TransactionVoidPayload"
+    }
+  ],
+  "post_completion_behavior": "UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+  "pre_completion_behavior": "UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+  "read_only": true,
+  "scope_evidence": "UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION \u2014 Shopify does not expose required access scopes through the schema. The only scope evidence this repository has is RESOLVE's own granted set, read live from `currentAppInstallation { accessScopes { handle } }`, which says what RESOLVE may do and nothing about what a cancellation operation would need.",
+  "unknowns": [
+    "Whether any disposal operation succeeds on a DRAFT order that has not been completed: UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+    "Whether cancellation of a completed order is permitted at all, and under what store conditions: UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+    "The value `displayFinancialStatus` takes after cancellation (e.g. whether it becomes VOIDED): UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+    "The access scope each disposal operation requires: UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+    "Whether cancellation is reversible: UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION",
+    "Whether a cancelled order remains readable by `read_orders` in the same shape: UNKNOWN \u2014 NOT EXPOSED BY INTROSPECTION"
+  ],
+  "verified_by": "live introspection of the Shopify Admin GraphQL schema, query documents only; 0 mutations sent \u2014 see documents_sent"
+}

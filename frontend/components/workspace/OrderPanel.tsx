@@ -1,0 +1,259 @@
+"use client";
+
+import type { ResolveOrder } from "@/lib/types";
+import { Card } from "@/components/ui/Card";
+import { formatMoney } from "@/lib/format";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ClipboardCheck,
+  FileText,
+  Loader2,
+  Package,
+  ShieldCheck,
+} from "lucide-react";
+
+// Copy for the three states the server can report. "awaiting" says only that RESOLVE bought this
+// from a catalog it can name and no pairing has arrived — never that a merchant order exists, and
+// never when one will.
+const MERCHANT_ORDER_COPY: Record<string, string> = {
+  linked: "Paired with a merchant order this store confirmed",
+  awaiting_linkage: "Payment verified — awaiting merchant order linkage",
+  unlinked: "No merchant order pairing on record",
+};
+
+interface OrderPanelProps {
+  /** Persisted RESOLVE order record, if one has been created. */
+  order: ResolveOrder | null;
+  /** True while a verified payment exists but no order record has been created yet. */
+  canCreate: boolean;
+  isProcessing?: boolean;
+  error?: string | null;
+  onCreate: () => void;
+  onConfirm: () => void;
+}
+
+export function OrderPanel({
+  order,
+  canCreate,
+  isProcessing = false,
+  error = null,
+  onCreate,
+  onConfirm,
+}: OrderPanelProps) {
+  const currency = order?.currency ?? null;
+  const confirmed = order?.status === "order_confirmed";
+  const postPurchase = order?.status === "awaiting_post_purchase_context";
+
+  return (
+    <Card className="p-5 shadow-soft border-accent-terracotta/25">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-text-charcoal/8 pb-4">
+        <div className="flex items-center gap-2">
+          <Package size={18} className="text-accent-terracotta" />
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-text-charcoal/50">
+              RESOLVE Order
+            </p>
+            <p className="font-display text-base text-text-charcoal">Order lifecycle record</p>
+          </div>
+        </div>
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-800">
+          <ShieldCheck size={11} className="shrink-0" />
+          Razorpay TEST MODE
+        </span>
+      </div>
+
+      <p className="mt-3.5 text-xs leading-relaxed text-text-charcoal/60">
+        {order?.fulfillment_note ??
+          "This is RESOLVE's own order record, created after the verified test payment. Payment verification is not merchant fulfillment."}
+      </p>
+
+      {order ? (
+        <>
+          {/* Lifecycle state */}
+          <div
+            className={`mt-3.5 flex items-start gap-2.5 rounded-xl border p-3.5 text-xs ${
+              postPurchase
+                ? "border-sky-500/25 bg-sky-500/10 text-sky-900"
+                : confirmed
+                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
+                  : "border-amber-500/25 bg-amber-500/10 text-amber-900"
+            }`}
+          >
+            {postPurchase ? (
+              <ClipboardCheck size={16} className="mt-0.5 shrink-0 text-sky-700" />
+            ) : confirmed ? (
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-700" />
+            ) : (
+              <FileText size={16} className="mt-0.5 shrink-0 text-amber-700" />
+            )}
+            <div>
+              <p
+                className={`font-semibold ${
+                  postPurchase
+                    ? "text-sky-800"
+                    : confirmed
+                      ? "text-emerald-800"
+                      : "text-amber-800"
+                }`}
+              >
+                {postPurchase
+                  ? "Awaiting post-purchase context"
+                  : confirmed
+                    ? "Order confirmed"
+                    : "Order created"}
+              </p>
+              <p
+                className={`mt-0.5 ${
+                  postPurchase
+                    ? "text-sky-700"
+                    : confirmed
+                      ? "text-emerald-700"
+                      : "text-amber-700"
+                }`}
+              >
+                {postPurchase
+                  ? "A post-purchase issue has been recorded against this RESOLVE order. It will be reviewed through deterministic resolution steps — no refund, replacement, or merchant action has been initiated."
+                  : confirmed
+                    ? "You confirmed this RESOLVE order record. You can report a post-purchase issue below — no merchant fulfillment is implied."
+                    : "The persistent RESOLVE order record was created from the verified test payment. Review it and confirm below."}
+              </p>
+            </div>
+          </div>
+
+          {/* Canonical order detail — every value came from the server */}
+          <div className="mt-3.5 space-y-2 rounded-xl bg-neutral-sand/20 p-4 text-sm">
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">RESOLVE order id</span>
+              <span className="font-mono text-xs font-semibold text-text-charcoal">
+                {order.order_id}
+              </span>
+            </div>
+            {/* Server-derived only. The merchant-side identifier is never sent to the browser, so
+                there is nothing here a client could copy back into a request. */}
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Merchant order</span>
+              <span className="text-right text-xs font-semibold text-text-charcoal">
+                {MERCHANT_ORDER_COPY[order.merchant_order_linkage]}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Product</span>
+              <span className="text-right font-semibold text-text-charcoal">
+                {order.product.title}
+              </span>
+            </div>
+            {order.product.merchant && (
+              <div className="flex items-center justify-between gap-4">
+                <span className="shrink-0 text-text-charcoal/60">Merchant</span>
+                <span className="font-semibold text-text-charcoal">{order.product.merchant}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Amount paid (test)</span>
+              <span className="font-bold text-accent-terracotta">
+                {formatMoney(order.amount, currency)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Currency</span>
+              <span className="font-semibold text-text-charcoal">{currency}</span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Razorpay order id</span>
+              <span className="font-mono text-xs font-semibold text-text-charcoal">
+                {order.razorpay_order_id}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="shrink-0 text-text-charcoal/60">Razorpay payment id</span>
+              <span className="font-mono text-xs font-semibold text-text-charcoal">
+                {order.razorpay_payment_id}
+              </span>
+            </div>
+            {order.created_at && (
+              <div className="flex items-center justify-between gap-4">
+                <span className="shrink-0 text-text-charcoal/60">Order record created</span>
+                <span className="text-xs font-semibold text-text-charcoal">
+                  {new Date(order.created_at).toLocaleString()}
+                </span>
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        canCreate && (
+          <div className="mt-3.5 flex items-start gap-2.5 rounded-xl border border-blue-500/25 bg-blue-500/10 p-3.5 text-xs text-blue-900">
+            <FileText size={16} className="mt-0.5 shrink-0 text-blue-700" />
+            <div>
+              <p className="font-semibold text-blue-800">Payment verified — create the order record</p>
+              <p className="mt-0.5 text-blue-700">
+                The next step records RESOLVE&apos;s persistent order context for this verified test
+                payment. It is created server-side from the persisted checkout state.
+              </p>
+            </div>
+          </div>
+        )
+      )}
+
+      {error && (
+        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3 text-xs font-medium text-primary-rose">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          {error}
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center justify-between gap-3 border-t border-text-charcoal/8 pt-4">
+        <span className="text-[11px] text-text-charcoal/50">
+          {order
+            ? "Record created & confirmed by the server — client supplies nothing"
+            : "Order values are derived from the verified payment"}
+        </span>
+        {!order && canCreate && (
+          <button
+            onClick={onCreate}
+            disabled={isProcessing}
+            className="inline-flex items-center gap-2 rounded-xl bg-accent-terracotta px-5 py-2.5 text-xs font-semibold text-surface shadow-soft transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isProcessing ? (
+              <>
+                <Loader2 size={13} className="animate-spin" />
+                Creating order record…
+              </>
+            ) : (
+              <>
+                <FileText size={13} />
+                Create Order Record
+              </>
+            )}
+          </button>
+        )}
+        {order && order.status === "order_created" && (
+          <button
+            onClick={onConfirm}
+            disabled={isProcessing}
+            className="inline-flex items-center gap-2 rounded-xl bg-accent-terracotta px-5 py-2.5 text-xs font-semibold text-surface shadow-soft transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isProcessing ? (
+              <>
+                <Loader2 size={13} className="animate-spin" />
+                Confirming order…
+              </>
+            ) : (
+              <>
+                <ClipboardCheck size={13} />
+                Confirm Order
+              </>
+            )}
+          </button>
+        )}
+        {confirmed && (
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
+            <CheckCircle2 size={13} />
+            Lifecycle complete
+          </span>
+        )}
+      </div>
+    </Card>
+  );
+}
