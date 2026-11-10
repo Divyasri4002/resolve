@@ -151,6 +151,15 @@ class ResolveOrderRecord(Base):
     shopify_variant_gid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     shopify_store_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Demo-environment delivery facts (M22 §1). Set exactly once by the server when the
+    # customer's reload persists the demo transition off order_confirmed; delivery_mode names it
+    # ("demo_simulated") so a simulated delivery can never be mistaken for a carrier- or
+    # merchant-confirmed one. Nullable and never backfilled: an order still awaiting its first
+    # reload has neither, and a future production fulfilment integration would write a different
+    # mode, not reuse this one.
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     __table_args__ = (
         Index(
             "uq_resolve_orders_provider_order_reference",

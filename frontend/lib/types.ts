@@ -125,7 +125,7 @@ export interface PaymentOrderResponse {
 export interface ResolveOrder {
   order_id: string;
   mission_id: string;
-  status: "order_created" | "order_confirmed" | "awaiting_post_purchase_context";
+  status: "order_created" | "order_confirmed" | "delivered" | "awaiting_post_purchase_context";
   product: {
     product_id?: string | null;
     title: string;
@@ -135,6 +135,13 @@ export interface ResolveOrder {
   currency: string;
   razorpay_order_id: string;
   razorpay_payment_id: string;
+  /**
+   * Demo delivery facts, server-persisted. `delivery_mode` is "demo_simulated" when the demo
+   * transition fired — never a carrier or merchant confirmation — and both stay null until the
+   * customer's reload persists it.
+   */
+  delivered_at?: string | null;
+  delivery_mode?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   test_mode?: boolean;

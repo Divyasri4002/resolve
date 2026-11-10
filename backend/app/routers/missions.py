@@ -1345,6 +1345,12 @@ def _fulfillment_note(order: ResolveOrderRecord) -> str:
     The one sentence that must never overstate. A verified test payment is not a merchant order, a
     merchant order is not a shipment, and a shipment is not a return — so each case says only itself.
     """
+    if order.delivery_mode == DEMO_DELIVERY_MODE:
+        return (
+            "Delivered in the demo environment — RESOLVE's own simulated delivery persisted on "
+            "reload. Not a carrier- or merchant-confirmed delivery, and no merchant order exists "
+            "on record."
+        )
     if order.provider_order_reference:
         return (
             "RESOLVE's order record after verified Razorpay TEST payment, paired with a merchant "
@@ -1354,6 +1360,9 @@ def _fulfillment_note(order: ResolveOrderRecord) -> str:
         "This is RESOLVE's order record after verified Razorpay TEST payment — "
         "no merchant order, shipping, or delivery exists."
     )
+
+
+DEMO_DELIVERY_MODE = "demo_simulated"
 
 
 def _order_response(order: ResolveOrderRecord, agent_message: str | None = None) -> dict:
@@ -1371,6 +1380,8 @@ def _order_response(order: ResolveOrderRecord, agent_message: str | None = None)
         "currency": order.currency,
         "razorpay_order_id": order.razorpay_order_id,
         "razorpay_payment_id": order.razorpay_payment_id,
+        "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
+        "delivery_mode": order.delivery_mode,
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         # Derived from the persisted linkage column, and nothing else. The merchant-side order id
@@ -1408,11 +1419,101 @@ async def get_resolve_order(
     """
     if request is not None and is_service_principal(request):
         return await _service_resolve_order(mission_id, db)
-    await _load_mission_for_shopping_action(mission_id, current_user, db)
+    record = await _load_mission_for_shopping_action(mission_id, current_user, db)
     order = await _load_order(db, mission_id)
     if order is None:
         raise HTTPException(status_code=404, detail="No order exists for this mission")
+    if (
+        settings.shopping_demo_delivery_enabled
+        and order.status == MissionStatus.ORDER_CONFIRMED.value
+    ):
+        order = await _persist_demo_delivery(record, order, db)
     return _order_response(order)
+
+
+async def _persist_demo_delivery(
+    record: MissionRecord, order: ResolveOrderRecord, db: AsyncSession
+) -> ResolveOrderRecord:
+    """
+    The demo-environment delivery transition (M22 §1): a customer's reload of a confirmed order
+    persists `delivered`. Guards, in order — an unverified/unpaid order never changes status, and
+    an order on the merchant path is never demo-delivered:
+
+      - the persisted payment must still be verified against this order's OWN Razorpay references
+        (the same pairing proof the purchase gate uses);
+      - no merchant-purchase authorization claim may exist for the order, whatever its status —
+        any claim means the merchant channel owns this order's outcome, and a simulated delivery
+        must never race or overwrite a real pairing.
+
+    The write itself is a conditional UPDATE gated on the row still being order_confirmed, so two
+    concurrent reloads persist exactly one transition, one audit event and one lifecycle event;
+    the loser re-reads the winner's committed row. The mode label travels with the row forever,
+    and the delivery state stays out of the conversational lifecycle ladder (lifecycle.py), so
+    only this endpoint can ever produce it.
+    """
+    intent_data = dict(record.shopping_intent or {})
+    payment = intent_data.get("payment") or {}
+    if not (
+        payment.get("status") == "verified"
+        and payment.get("razorpay_order_id") == order.razorpay_order_id
+        and payment.get("razorpay_payment_id") == order.razorpay_payment_id
+    ):
+        return order
+    if await _load_purchase_authorization(db, order.order_id) is not None:
+        return order
+
+    now = datetime.utcnow()
+    result = await db.execute(
+        update(ResolveOrderRecord)
+        .where(
+            ResolveOrderRecord.mission_id == order.mission_id,
+            ResolveOrderRecord.status == MissionStatus.ORDER_CONFIRMED.value,
+        )
+        .values(
+            status=MissionStatus.DELIVERED.value,
+            delivered_at=now,
+            delivery_mode=DEMO_DELIVERY_MODE,
+            updated_at=now,
+        )
+    )
+    if result.rowcount != 1:
+        # A concurrent reload won the transition. Discard this transaction's failed UPDATE and
+        # re-read the winner's committed row; append nothing.
+        await db.rollback()
+        await db.refresh(order)
+        return order
+
+    await db.refresh(order)
+    intent_data["state"] = MissionStatus.DELIVERED.value
+    record.shopping_intent = intent_data
+    record.status = MissionStatus.DELIVERED.value
+    await audit.append_event(
+        db,
+        mission_id=order.mission_id,
+        actor="system",
+        action="order_delivered",
+        recorded=True,
+        reason=(
+            f"Demo-environment delivery persisted for RESOLVE order {order.order_id} on the "
+            f"customer's reload (delivery_mode={DEMO_DELIVERY_MODE}); RESOLVE's own simulated "
+            "transition, not a carrier or merchant confirmation"
+        ),
+    )
+    delivered_row = await append_lifecycle_event(
+        db,
+        mission_id=order.mission_id,
+        user_id=record.user_id,
+        state=MissionStatus.DELIVERED.value,
+        detail=f"Order {order.order_id} delivered (demo simulated).",
+        extra_payload={
+            "status": MissionStatus.DELIVERED.value,
+            "order_id": order.order_id,
+            "delivery_mode": DEMO_DELIVERY_MODE,
+        },
+    )
+    await db.commit()
+    await broadcast_event_row(delivered_row)
+    return order
 
 
 async def _service_resolve_order(mission_id: str, db: AsyncSession) -> dict:
@@ -2355,6 +2456,7 @@ async def report_order_issue(
         raise HTTPException(status_code=404, detail="No order exists for this mission")
     allowed_order_states = {
         MissionStatus.ORDER_CONFIRMED.value,
+        MissionStatus.DELIVERED.value,
         MissionStatus.AWAITING_POST_PURCHASE_CONTEXT.value,
     }
     if order.status not in allowed_order_states:
@@ -2390,7 +2492,10 @@ async def report_order_issue(
     db.add(issue)
     await db.flush()
 
-    if order.status == MissionStatus.ORDER_CONFIRMED.value:
+    if order.status in {
+        MissionStatus.ORDER_CONFIRMED.value,
+        MissionStatus.DELIVERED.value,
+    }:
         order.status = MissionStatus.AWAITING_POST_PURCHASE_CONTEXT.value
         intent_data = dict(record.shopping_intent or {})
         intent_data["state"] = MissionStatus.AWAITING_POST_PURCHASE_CONTEXT.value

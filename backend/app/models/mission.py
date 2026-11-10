@@ -80,6 +80,7 @@ class MissionStatus(StrEnum):
     # RESOLVE order lifecycle (Task 08) — post-payment record/context, NOT merchant fulfillment
     ORDER_CREATED = "order_created"           # Persistent RESOLVE order record created from the verified payment
     ORDER_CONFIRMED = "order_confirmed"       # User explicitly confirmed the RESOLVE order record (no merchant order implied)
+    DELIVERED = "delivered"                   # Demo-environment delivery of the confirmed record (delivery_mode=demo_simulated); never a carrier or merchant confirmation
 
     # Post-purchase context (Task 09) — issue intake on the confirmed order record
     AWAITING_POST_PURCHASE_CONTEXT = "awaiting_post_purchase_context"  # A post-purchase issue has been recorded; resolution options under deterministic review

@@ -499,10 +499,11 @@ async def test_I_a_denied_issue_stays_visible_with_its_outcome(
         mission_id, (a_id,) = await _issue_mission(
             client, install_mock_discovery, sample_products, "denied@core7p4.test", [DAMAGED]
         )
-        # No authority delegated: the Engine denies the assessed proposal, the denial is
-        # persisted, and the issue must still be visible to the agent afterwards — a denial is
-        # not a quiet close. (/assess first: /resolve refuses an unassessed issue before the
-        # Engine is ever consulted, so nothing would be persisted otherwise.)
+        # No authority delegated: the assessment escalates the gap (delegation offered, nothing
+        # executed), the fresh Engine gate refuses the resolution attempt, and the issue must
+        # still be visible to the agent afterwards — a refusal is not a quiet close.
+        # (/assess first: /resolve refuses an unassessed issue before the Engine is ever
+        # consulted, so nothing would be persisted otherwise.)
         assert (await _assess(client, mission_id, a_id)).status_code == 200
         refused = await _resolve(client, mission_id, a_id)
         assert refused.status_code == 400, refused.text
@@ -513,7 +514,7 @@ async def test_I_a_denied_issue_stays_visible_with_its_outcome(
 
         a_view = _open_issue(scripted.contexts[0], a_id)
         assert a_view["resolution_state"] == "denied"
-        assert a_view["assessment_decision"] == "deny"
+        assert a_view["assessment_decision"] == "escalate"
 
 
 async def test_J_a_failed_issue_stays_visible_with_its_outcome(

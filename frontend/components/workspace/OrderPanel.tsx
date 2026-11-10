@@ -43,6 +43,10 @@ export function OrderPanel({
 }: OrderPanelProps) {
   const currency = order?.currency ?? null;
   const confirmed = order?.status === "order_confirmed";
+  // "delivered" is the persisted demo transition (delivery_mode=demo_simulated); the delivered_at
+  // fact stays on the row even after an issue moves the status to post-purchase.
+  const delivered = order?.status === "delivered";
+  const wasDelivered = !!order?.delivered_at;
   const postPurchase = order?.status === "awaiting_post_purchase_context";
 
   return (
@@ -73,14 +77,18 @@ export function OrderPanel({
           {/* Lifecycle state */}
           <div
             className={`mt-3.5 flex items-start gap-2.5 rounded-xl border p-3.5 text-xs ${
-              postPurchase
-                ? "border-sky-500/25 bg-sky-500/10 text-sky-900"
-                : confirmed
-                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
-                  : "border-amber-500/25 bg-amber-500/10 text-amber-900"
+              delivered
+                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
+                : postPurchase
+                  ? "border-sky-500/25 bg-sky-500/10 text-sky-900"
+                  : confirmed
+                    ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
+                    : "border-amber-500/25 bg-amber-500/10 text-amber-900"
             }`}
           >
-            {postPurchase ? (
+            {delivered ? (
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-700" />
+            ) : postPurchase ? (
               <ClipboardCheck size={16} className="mt-0.5 shrink-0 text-sky-700" />
             ) : confirmed ? (
               <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-700" />
@@ -90,33 +98,41 @@ export function OrderPanel({
             <div>
               <p
                 className={`font-semibold ${
-                  postPurchase
-                    ? "text-sky-800"
-                    : confirmed
-                      ? "text-emerald-800"
-                      : "text-amber-800"
+                  delivered
+                    ? "text-emerald-800"
+                    : postPurchase
+                      ? "text-sky-800"
+                      : confirmed
+                        ? "text-emerald-800"
+                        : "text-amber-800"
                 }`}
               >
-                {postPurchase
-                  ? "Awaiting post-purchase context"
-                  : confirmed
-                    ? "Order confirmed"
-                    : "Order created"}
+                {delivered
+                  ? "Delivered (demo simulated)"
+                  : postPurchase
+                    ? "Awaiting post-purchase context"
+                    : confirmed
+                      ? "Order confirmed"
+                      : "Order created"}
               </p>
               <p
                 className={`mt-0.5 ${
-                  postPurchase
-                    ? "text-sky-700"
-                    : confirmed
-                      ? "text-emerald-700"
-                      : "text-amber-700"
+                  delivered
+                    ? "text-emerald-700"
+                    : postPurchase
+                      ? "text-sky-700"
+                      : confirmed
+                        ? "text-emerald-700"
+                        : "text-amber-700"
                 }`}
               >
-                {postPurchase
-                  ? "A post-purchase issue has been recorded against this RESOLVE order. It will be reviewed through deterministic resolution steps — no refund, replacement, or merchant action has been initiated."
-                  : confirmed
-                    ? "You confirmed this RESOLVE order record. You can report a post-purchase issue below — no merchant fulfillment is implied."
-                    : "The persistent RESOLVE order record was created from the verified test payment. Review it and confirm below."}
+                {delivered
+                  ? "RESOLVE persisted this delivery in the demo environment on your reload. It is simulated — not a carrier or merchant confirmation — and you can report a post-purchase issue below."
+                  : postPurchase
+                    ? `A post-purchase issue has been recorded against this RESOLVE order.${wasDelivered ? " The order was demo-delivered before the issue was reported." : ""} It will be reviewed through deterministic resolution steps — no refund, replacement, or merchant action has been initiated.`
+                    : confirmed
+                      ? "You confirmed this RESOLVE order record. You can report a post-purchase issue below — no merchant fulfillment is implied."
+                      : "The persistent RESOLVE order record was created from the verified test payment. Review it and confirm below."}
               </p>
             </div>
           </div>
@@ -176,6 +192,14 @@ export function OrderPanel({
                 <span className="shrink-0 text-text-charcoal/60">Order record created</span>
                 <span className="text-xs font-semibold text-text-charcoal">
                   {new Date(order.created_at).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {order.delivered_at && (
+              <div className="flex items-center justify-between gap-4">
+                <span className="shrink-0 text-text-charcoal/60">Delivered (demo simulated)</span>
+                <span className="text-xs font-semibold text-text-charcoal">
+                  {new Date(order.delivered_at).toLocaleString()} · {order.delivery_mode}
                 </span>
               </div>
             )}
@@ -247,10 +271,10 @@ export function OrderPanel({
             )}
           </button>
         )}
-        {confirmed && (
+        {(confirmed || delivered) && (
           <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
             <CheckCircle2 size={13} />
-            Lifecycle complete
+            {delivered ? "Demo journey complete" : "Lifecycle complete"}
           </span>
         )}
       </div>

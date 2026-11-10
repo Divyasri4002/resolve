@@ -1325,6 +1325,7 @@ export default function WorkspacePage() {
               {isShoppingMission &&
                 orderRecord &&
                 (orderRecord.status === "order_confirmed" ||
+                  orderRecord.status === "delivered" ||
                   orderRecord.status === "awaiting_post_purchase_context") && (
                   <IssuePanel
                     issues={orderIssues}

@@ -178,6 +178,18 @@ def test_classify_return_disabled_is_deployment_policy(monkeypatch):
     assert classify_block(authority, proposal, decision) is BlockCategory.DEPLOYMENT_POLICY
 
 
+def test_classify_switch_off_and_never_delegated_is_deployment_policy(monkeypatch):
+    # The compound case: evaluate() reports "never delegated" (its check runs first), but no
+    # delegation can cure a deployment whose switch is off — so the classification must be
+    # policy, not an authority gap that would send the owner to delegate into a wall.
+    monkeypatch.setattr(get_settings(), "shopping_replacement_authority_enabled", False)
+    authority = make_authority(allowed_actions=[AllowedAction.NEGOTIATE])
+    proposal = ProposedAction(AllowedAction.REQUEST_REPLACEMENT)
+    decision = _blocked(authority, proposal)
+    assert "never delegated" in decision.reason  # evaluate()'s own verdict, unchanged
+    assert classify_block(authority, proposal, decision) is BlockCategory.DEPLOYMENT_POLICY
+
+
 def test_classify_spend_over_budget_is_authority_gap():
     authority = make_authority()
     proposal = ProposedAction(AllowedAction.PAY_RECOVERY_COST, Decimal("15000"))

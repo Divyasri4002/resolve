@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     merchant_trigger_token: str = ""
     shopping_purchase_authority_enabled: bool = False
 
+    # Demo-environment delivery (M22 §1). When on, a customer's reload of a confirmed order
+    # persists the demo transition to `delivered` with delivery_mode=demo_simulated — RESOLVE's
+    # own simulated lifecycle step for the demo journey, never a carrier or merchant
+    # confirmation, and never applied to an order carrying a merchant-purchase authorization
+    # claim. OFF by default: a confirmed order then stays confirmed, and a future production
+    # fulfilment integration would replace this transition rather than widen it.
+    shopping_demo_delivery_enabled: bool = False
+
     # Shopify READ-ONLY connectivity (Task 14B.3). Deliberately not connected to any executor,
     # the Authority Engine, or the Resolution Orchestrator: it can authenticate and read, and
     # nothing else. Credentials come from the environment only — never from code, logs,

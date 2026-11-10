@@ -45,6 +45,10 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
         ("shopify_product_gid", "shopify_product_gid VARCHAR(128)"),
         ("shopify_variant_gid", "shopify_variant_gid VARCHAR(128)"),
         ("shopify_store_domain", "shopify_store_domain VARCHAR(255)"),
+        # M22 §1: the demo delivery facts. Nullable — an order the customer has not reloaded
+        # past confirmation has neither, which is the truth for it.
+        ("delivered_at", "delivered_at TIMESTAMP"),
+        ("delivery_mode", "delivery_mode VARCHAR(32)"),
     ),
     "returns": (
         ("provider_order_reference", "provider_order_reference VARCHAR(128)"),

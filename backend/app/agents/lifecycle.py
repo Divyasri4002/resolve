@@ -38,6 +38,9 @@ _LIFECYCLE_RANK: dict[str, int] = {
     MissionStatus.ORDER_CONFIRMED.value: 10,
     MissionStatus.AWAITING_POST_PURCHASE_CONTEXT.value: 11,
 }
+# `delivered` (MissionStatus.DELIVERED) is deliberately absent: the demo delivery transition is
+# endpoint-only, and a rank here would let a conversational turn fabricate it — both the write
+# to it and any conversational move from it fall through the None-rank guard below untouched.
 
 # The rung from which a mission has committed to something: a product is picked, a checkout is
 # reviewed or confirmed, money has been paid, an order exists. A conversation may still refine the
