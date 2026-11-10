@@ -907,6 +907,8 @@ export default function WorkspacePage() {
 
   const handleAssessIssue = (issueId: string) =>
     runIssueOperation(issueId, "assess", "Assessment recorded");
+  const handleReassessIssue = (issueId: string) =>
+    runIssueOperation(issueId, "reassess", "Reassessment recorded");
   const handleExecuteRefund = (issueId: string) =>
     runIssueOperation(issueId, "refund", "Refund attempt");
   const handleExecuteReplacement = (issueId: string) =>
@@ -1328,8 +1330,10 @@ export default function WorkspacePage() {
                     issues={orderIssues}
                     isProcessing={isIssueBusy}
                     error={issueError}
+                    delegatedActions={selected?.allowed_actions ?? []}
                     onReport={handleReportIssue}
                     onAssess={handleAssessIssue}
+                    onReassess={handleReassessIssue}
                     onRefund={handleExecuteRefund}
                     onReplace={handleExecuteReplacement}
                     onReturn={handleExecuteReturn}

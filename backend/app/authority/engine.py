@@ -239,6 +239,85 @@ def evaluate(authority: Authority, proposal: ProposedAction) -> AuthorityDecisio
     )
 
 
+class BlockCategory(StrEnum):
+    """
+    Why a BLOCKED decision was blocked — and, more importantly, whether the mission's owner
+    could cure it with a delegation.
+
+    The assessment layer classifies every refusal with this: an authority gap (never delegated,
+    expired, above the ceiling, over budget) is routed to manual review with delegation offered,
+    because the mandate's owner can close it; a deployment-policy refusal (an operator switch is
+    off) or an invalid proposal is recorded as denied, because no delegation can change either.
+    """
+
+    AUTHORITY_GAP = "authority_gap"
+    DEPLOYMENT_POLICY = "deployment_policy"
+    PROPOSAL_INVALID = "proposal_invalid"
+
+
+def classify_block(
+    authority: Authority, proposal: ProposedAction, decision: AuthorityDecision
+) -> BlockCategory:
+    """
+    Classify a BLOCKED decision the same way evaluate() produced it — same checks, same order,
+    same inputs. Both functions are called with the identical (authority, proposal) pair in the
+    same request, so their predicates agree by construction, and test_authority_engine.py pins
+    every blocked evaluate() outcome to exactly one category: if evaluate()'s checks ever change,
+    change this in the same commit or that battery fails.
+
+    Fail-safe default: any future check evaluate() adds that classify_block does not yet know
+    about classifies as an authority gap — escalated to a human, never silently denied.
+
+    An approved decision has no category; only a blocked one may be classified.
+    """
+    from datetime import datetime
+
+    if decision.approved:
+        raise ValueError("classify_block is only meaningful for a blocked decision")
+
+    # 1. Expiry — renewal cures it.
+    if authority.expires_at is not None and datetime.utcnow() > authority.expires_at:
+        return BlockCategory.AUTHORITY_GAP
+
+    # 2. Never delegated (or revoked) — a delegation cures it.
+    if not authority.has_action(proposal.action):
+        return BlockCategory.AUTHORITY_GAP
+
+    # 3. Refund — the deployment switch is policy; a malformed amount is the proposal's fault;
+    #    above the ceiling is a gap a re-delegation (within the deployment ceiling) may close.
+    if proposal.action is AllowedAction.REQUEST_REFUND:
+        ceiling = refund_ceiling(authority)
+        if ceiling is None:
+            return BlockCategory.DEPLOYMENT_POLICY
+        if proposal.amount is None or proposal.amount <= 0:
+            return BlockCategory.PROPOSAL_INVALID
+        if proposal.amount > ceiling:
+            return BlockCategory.AUTHORITY_GAP
+
+    # 4. Replacement — deployment switch only (checked for this action in evaluate()).
+    if proposal.action is AllowedAction.REQUEST_REPLACEMENT:
+        from app.config import get_settings
+
+        if not get_settings().shopping_replacement_authority_enabled:
+            return BlockCategory.DEPLOYMENT_POLICY
+
+    # 5. Return — deployment switch only.
+    if proposal.action is AllowedAction.REQUEST_RETURN:
+        from app.config import get_settings
+
+        if not get_settings().shopping_return_authority_enabled:
+            return BlockCategory.DEPLOYMENT_POLICY
+
+    # 6. Spend — a malformed amount is the proposal's fault; over budget is a gap.
+    if proposal.action is AllowedAction.PAY_RECOVERY_COST:
+        if proposal.amount is None or proposal.amount <= 0:
+            return BlockCategory.PROPOSAL_INVALID
+        if proposal.amount > authority.remaining_budget:
+            return BlockCategory.AUTHORITY_GAP
+
+    return BlockCategory.AUTHORITY_GAP
+
+
 def apply_spend(authority: Authority, amount: Decimal) -> Authority:
     """
     Returns a NEW Authority with spent_so_far incremented. Called only after:

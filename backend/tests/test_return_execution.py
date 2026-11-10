@@ -487,7 +487,7 @@ async def test_guards_reject_before_any_provider_call(
         undelegated = await _issue(client, mission_id, kind="none")
         await _delegate(test_session, mission_id, ["request_replacement"])
         denied2 = await _assess(client, mission_id, undelegated)
-        assert denied2["authority_decision"] == "deny"
+        assert denied2["authority_decision"] == "escalate"
         assert "never delegated" in denied2["decision_reason"]
         resp = await _ret(client, mission_id, undelegated)
         assert resp.status_code == 400 and "explicit allow" in resp.json()["detail"]

@@ -26,6 +26,7 @@ from app.ledger.store import (
     TransportFailure,
     VersionInfo,
 )
+from app.ledger.worm import PermissiveWormPolicy
 from app.ledger.verify import (
     CURRENCY_CURRENT,
     VERDICT_HEALTHY,
@@ -250,7 +251,10 @@ async def read_pin(sb) -> dict:
 
 
 def make_publisher(sb, store, clock) -> Publisher:
-    return Publisher(sb.sessions, store, lease_seconds=60.0, clock=clock)
+    # The publisher state machine under test is WORM-independent by design; enforcement
+    # itself is battery-tested in test_ledger_worm.py and the conformance W battery.
+    return Publisher(sb.sessions, store, worm=PermissiveWormPolicy(),
+                     lease_seconds=60.0, clock=clock)
 
 
 # --------------------------------------------------------------------------- #

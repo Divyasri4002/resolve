@@ -846,13 +846,14 @@ async def _named_or_latest_issue(
 
 async def _assessable_issue(call: ToolCall, m: Any) -> OrderIssueRecord | None:
     """
-    The issue an assessment is owed: never assessed, waiting on the buyer's answer, or refused under
-    a mandate that may since have changed.
+    The issue an assessment is owed: never assessed, waiting on the buyer's answer, refused under
+    a mandate that may since have changed, or escalated with an authority gap the owner may have
+    closed by delegating (M22).
 
-    The last case is what makes a refusal recoverable at all. `reassess_issue` re-runs the same gate
-    against the mandate as it reads now, so a remedy the user delegates after the refusal can still
-    be delivered — and a remedy they never delegate is refused again, at the same cost of one audit
-    row.
+    The last two cases are what make a refusal recoverable at all. `reassess_issue` re-runs the
+    same gate against the mandate as it reads now, so a remedy the user delegates after the
+    refusal can still be delivered — and a remedy they never delegate is refused or escalated
+    again, at the same cost of one audit row.
     """
     arguments: IssueScopedArgs = call.arguments  # type: ignore[assignment]
     if arguments.issue_id:
@@ -860,10 +861,13 @@ async def _assessable_issue(call: ToolCall, m: Any) -> OrderIssueRecord | None:
     for issue in reversed(await _load_mission_issues(call.mission_id, call.db)):
         if getattr(issue, "more_information_question", None):
             return issue
-        if await m._load_assessment(call.db, issue.issue_id) is None:
+        assessment = await m._load_assessment(call.db, issue.issue_id)
+        if assessment is None:
             return issue
         resolution = await m._load_resolution_row(call.db, issue.issue_id)
         if resolution is not None and resolution.resolution_state == "denied":
+            return issue
+        if assessment.authority_decision == "escalate":
             return issue
     return None
 

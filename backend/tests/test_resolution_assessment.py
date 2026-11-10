@@ -7,7 +7,7 @@ return, merchant contact, or payment change exists in this system, and every
 test asserts that boundary.
 
 Covers the mandated scenarios:
-- TEST 1:  deny path — remedy proposal blocked by the Authority Engine
+- TEST 1:  authority-gap path — an undelegated remedy is ESCALATED with delegation offered (M22)
 - TEST 2:  allow path — intrinsically safe proposal passes the gate
 - TEST 3:  escalate path + model's free-form fields are data, never commands
 - TEST 4:  refund amount is ALWAYS the canonical order amount, never the model's
@@ -299,11 +299,13 @@ def _model_proposal(action="request_refund", **overrides):
 
 
 # --------------------------------------------------------------------------- #
-# TEST 1: deny path — the hermetic mock mirrors the 'replacement' preference,
-# the Authority Engine blocks it (nothing was delegated on a shopping mission)
+# TEST 1: authority gap on a remedy — the hermetic mock mirrors the 'replacement'
+# preference, the Authority Engine blocks it (nothing was delegated on a shopping
+# mission), and the assessment records an ESCALATION the owner can cure by
+# delegating — never a bare denial (M22)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_replacement_proposal_is_denied_by_engine(
+async def test_replacement_proposal_is_escalated_when_never_delegated(
     async_client: AsyncClient, install_mock_discovery, sample_products, mock_razorpay
 ):
     mission_id = await _verified_mission(
@@ -323,11 +325,13 @@ async def test_replacement_proposal_is_denied_by_engine(
     assert data["proposed_action"] == "request_replacement"
     assert data["requested_amount"] is None
     assert data["proposal_source"] == "reasoning_model"
-    assert data["authority_decision"] == "deny"
+    assert data["authority_decision"] == "escalate"
     assert "never delegated" in data["decision_reason"]
+    assert "authority gap" in data["decision_reason"]
+    assert data["needs_escalation"] is True
     # Proposal vocabulary only — execution is claimed nowhere
     assert "Action has NOT been executed" in data["execution_note"]
-    assert "blocked by the Authority Engine" in data["agent_message"]
+    assert "escalated for human review" in data["agent_message"]
 
     # The backend — not the model — advanced the deterministic issue lifecycle
     issues = (await async_client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
@@ -418,10 +422,11 @@ async def test_refund_amount_is_canonical_not_model_supplied(
     assert data["proposed_action"] == "request_refund"
     assert Decimal(str(data["requested_amount"])) == Decimal("399.00")  # canonical item_dove
     assert data["currency"] == "INR"
-    # The gate still says no: refund authority was never delegated on a shopping mission
-    assert data["authority_decision"] == "deny"
-    # And a model claim of "executed" in free text changes nothing about the vocabulary
-    assert data["needs_escalation"] is False
+    # The gate still says no: refund authority was never delegated on a shopping mission —
+    # an authority gap, which the assessment records as an escalation (M22)
+    assert data["authority_decision"] == "escalate"
+    # And the backend derives the escalation flag itself, whatever the model claimed
+    assert data["needs_escalation"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -623,7 +628,8 @@ async def test_client_cannot_force_allow_or_supply_amounts(
         )
     ).json()
 
-    assert data["authority_decision"] == "deny"  # engine verdict, not the client's
+    assert data["authority_decision"] == "escalate"  # gate outcome, never the client's
+    assert "never delegated" in data["decision_reason"]  # ...and the gap is what it names
     assert Decimal(str(data["requested_amount"])) == Decimal("399.00")
     assert data["proposed_action"] == "request_refund"  # provider's, not the body's
     assert data["order_id"] == order_id
@@ -813,7 +819,7 @@ async def test_audit_log_records_engine_decisions(
 
         body = (await client.get(f"/missions/{mission_id}/order/issues")).json()
         assessments = {i["issue_id"]: i["assessment"] for i in body["issues"]}
-        assert assessments[issue_a]["authority_decision"] == "deny"
+        assert assessments[issue_a]["authority_decision"] == "escalate"
         assert assessments[issue_b]["authority_decision"] == "allow"
 
         # A repeat call adds no audit rows either
@@ -910,7 +916,7 @@ async def test_assessment_persists_across_restart(
         order_id = await _confirmed_order(client_a, mission_id)
         issue_id = await _issue_on_confirmed_order(client_a, mission_id)
         created = (await _assess(client_a, mission_id, issue_id)).json()
-        assert created["authority_decision"] == "deny"
+        assert created["authority_decision"] == "escalate"
 
     async with make_client() as client_b:
         await _login(client_b, "olga@shop.com")
@@ -920,7 +926,7 @@ async def test_assessment_persists_across_restart(
         assessment = issue["assessment"]
         assert assessment["assessment_id"] == created["assessment_id"]
         assert assessment["proposed_action"] == "request_replacement"
-        assert assessment["authority_decision"] == "deny"
+        assert assessment["authority_decision"] == "escalate"
         assert assessment["order_id"] == order_id
 
         # Reassessment after restart stays idempotent

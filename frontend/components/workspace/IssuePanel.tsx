@@ -93,6 +93,42 @@ const TERMINAL_RESOLUTION_STATES = new Set([
   "no_action",
 ]);
 
+// Remedies whose absence from the mandate surfaces as an authority gap the owner can close
+// by delegating and then reassessing (M22).
+const REMEDY_ACTIONS = new Set(["request_refund", "request_replacement", "request_return"]);
+
+function assessmentWarning(
+  assessment: OrderIssue["assessment"] | undefined | null
+): string {
+  const generic =
+    "Proposal only — this is not an executed action. No refund, replacement, return, or merchant contact has occurred.";
+  if (!assessment) return generic;
+  const remedy =
+    assessment.proposed_action === "request_refund"
+      ? "refund"
+      : assessment.proposed_action === "request_replacement"
+        ? "replacement"
+        : assessment.proposed_action === "request_return"
+          ? "return"
+          : null;
+  if (assessment.authority_decision === "allow") {
+    if (assessment.proposed_action === "request_refund") {
+      return "Refund authorized within the delegated limit — but nothing has been executed yet. Executing the TEST-mode refund is a separate, explicit action.";
+    }
+    if (assessment.proposed_action === "request_replacement") {
+      return "Replacement authorized by the Authority Engine — but nothing has been executed yet, and a merchant replacement requires a connected fulfilment provider.";
+    }
+    return generic;
+  }
+  if (assessment.authority_decision === "escalate" && remedy) {
+    return `The ${remedy} needs delegated authority this mission does not hold — delegate it in the mission panel, then reassess this issue; or route it to manual review. Nothing has been executed.`;
+  }
+  if (assessment.authority_decision === "deny" && remedy) {
+    return `A ${remedy} cannot be authorized for this case right now — the reason is on the record above, and the case can be routed to manual review. Nothing has been executed.`;
+  }
+  return generic;
+}
+
 function issueTypeLabel(value: string): string {
   return ISSUE_TYPES.find((t) => t.value === value)?.label ?? value;
 }
@@ -109,8 +145,12 @@ interface IssuePanelProps {
   issues: OrderIssue[];
   isProcessing?: boolean;
   error?: string | null;
+  /** M22: remedies already delegated on this mission — drives the reassess affordance. */
+  delegatedActions?: string[];
   onReport: (issueType: string, description: string, requestedResolution: string) => Promise<boolean>;
   onAssess: (issueId: string) => Promise<boolean>;
+  /** M22: re-run the assessment after a delegation — an authority gap is recoverable. */
+  onReassess?: (issueId: string) => Promise<boolean>;
   onRefund: (issueId: string) => Promise<boolean>;
   onReplace: (issueId: string) => Promise<boolean>;
   onReturn: (issueId: string) => Promise<boolean>;
@@ -124,8 +164,10 @@ export function IssuePanel({
   issues,
   isProcessing = false,
   error = null,
+  delegatedActions = [],
   onReport,
   onAssess,
+  onReassess,
   onRefund,
   onReplace,
   onReturn,
@@ -265,19 +307,7 @@ export function IssuePanel({
                   </p>
                   <p className="mt-2 flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 font-semibold text-amber-800">
                     <AlertCircle size={12} className="shrink-0" />
-                    {issue.assessment.authority_decision === "allow" &&
-                    issue.assessment.proposed_action === "request_refund"
-                      ? "Refund authorized within the delegated limit — but nothing has been executed yet. Executing the TEST-mode refund is a separate, explicit action."
-                      : issue.assessment.authority_decision === "allow" &&
-                          issue.assessment.proposed_action === "request_replacement"
-                        ? "Replacement authorized by the Authority Engine — but nothing has been executed yet, and a merchant replacement requires a connected fulfilment provider."
-                        : issue.assessment.authority_decision !== "allow" &&
-                            issue.assessment.proposed_action === "request_refund"
-                          ? "Refund requires escalation or explicit delegated authority. Nothing has been executed."
-                          : issue.assessment.authority_decision !== "allow" &&
-                              issue.assessment.proposed_action === "request_replacement"
-                            ? "Replacement requires escalation or explicit delegated authority. Nothing has been executed."
-                            : "Proposal only — this is not an executed action. No refund, replacement, return, or merchant contact has occurred."}
+                    {assessmentWarning(issue.assessment)}
                   </p>
                         <p className="mt-1 font-mono text-[10px] text-text-charcoal/40">
                     {issue.assessment.assessment_id}
@@ -316,6 +346,30 @@ export function IssuePanel({
                     {isProcessing
                       ? "Resolving…"
                       : "Resolve issue (the backend re-checks authority and runs the permitted action)"}
+                  </button>
+                )}
+
+              {/* M22: an authority gap is recoverable — once the owner delegates the remedy
+                  (mission panel), reassessment runs the same gate against the new mandate. */}
+              {issue.assessment?.authority_decision === "escalate" &&
+                REMEDY_ACTIONS.has(issue.assessment.proposed_action) &&
+                !delegatedActions.includes(issue.assessment.proposed_action) &&
+                !issue.manual_review?.requested &&
+                !TERMINAL_RESOLUTION_STATES.has(issue.resolution?.resolution_state ?? "") &&
+                onReassess && (
+                  <button
+                    onClick={() => onReassess(issue.issue_id)}
+                    disabled={isProcessing}
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-sky-500/40 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-500 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isProcessing ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <ClipboardList size={12} />
+                    )}
+                    {isProcessing
+                      ? "Reassessing…"
+                      : "Reassess after delegating the remedy (mission panel)"}
                   </button>
                 )}
 

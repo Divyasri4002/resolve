@@ -409,7 +409,7 @@ async def test_golden_safety_scenario_proposal_deny_delegate_allow_pending_retry
         issue_id = issues[0]["issue_id"]
         proposal = issues[0]["assessment"]
         assert proposal["proposed_action"] == "request_replacement"
-        assert proposal["authority_decision"] == "deny"
+        assert proposal["authority_decision"] == "escalate"
         denied = issues[0]["resolution"]
         assert denied["resolution_state"] == "denied"
         assert denied["provider_attempted"] is False

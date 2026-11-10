@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     ledger_publisher_poll_seconds: float = Field(default=5.0, gt=0, le=300)
     ledger_publisher_lease_seconds: float = Field(default=60.0, gt=0, le=600)
 
+    # Evidence-bucket WORM floor (4.6.3): the publisher refuses to run unless the bucket's
+    # Object Lock COMPLIANCE default retention is at least this many days. No approved
+    # RESOLVE evidence-retention policy existed at implementation time (the only prior
+    # retention commitment was Shopify's 30-day order-data window), so 365 is the explicit
+    # conservative floor — a deployment must RAISE it to its own policy value, never lower
+    # it. AWS caps object-lock retention at 36,500 days (100 years; 1 year = 365 days).
+    ledger_worm_min_retention_days: int = Field(default=365, gt=0, le=36500)
+
     # Auth & CORS
     auth_secret: str = "resolve-auth-secret-key-change-in-production"
     auth_cookie_name: str = "resolve_session"

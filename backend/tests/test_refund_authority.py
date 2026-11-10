@@ -323,7 +323,7 @@ async def test_canonical_amount_above_ceiling_is_denied(
         fake_reasoning(_refund_proposal(1))
         assessment = await _assess(client, mission_id, issue_id)
         assert assessment["requested_amount"] == "399.00"  # canonical, not the model's ₹1
-        assert assessment["authority_decision"] == "deny"
+        assert assessment["authority_decision"] == "escalate"
         assert "exceeds the delegated refund ceiling of ₹300" in assessment["decision_reason"]
 
         resp = await _refund(client, mission_id, issue_id)
@@ -390,7 +390,7 @@ async def test_client_body_cannot_change_authority(
         fake_reasoning(_refund_proposal(399))
         assessment = await _assess(client, mission_id, issue_id)
         # The mandate cannot raise itself past the deployment ceiling either.
-        assert assessment["authority_decision"] == "deny"
+        assert assessment["authority_decision"] == "escalate"
         assert "exceeds the delegated refund ceiling of ₹300" in assessment["decision_reason"]
 
         resp = await _refund(

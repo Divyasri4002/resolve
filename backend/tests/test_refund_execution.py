@@ -403,10 +403,12 @@ async def test_guards_reject_without_touching_provider(
         resp = await _refund(client, mission_id, replacement_issue)
         assert resp.status_code == 400 and "request_refund" in resp.json()["detail"]
 
-        # TEST 9: Authority Engine DENY (refund proposed but nothing delegated)
+        # TEST 9: Authority Engine block on an undelegated refund — an authority gap is
+        # ESCALATED on the assessment row (delegation offered); the refund endpoint still
+        # refuses because execution requires an explicit allow.
         await _set_mandate_authority(test_session, mission_id, [], "0")
         denied = await _assess(client, mission_id, issue_id)
-        assert denied["authority_decision"] == "deny"
+        assert denied["authority_decision"] == "escalate"
         resp = await _refund(client, mission_id, issue_id)
         assert resp.status_code == 400 and "requires an explicit allow" in resp.json()["detail"]
 

@@ -41,9 +41,11 @@ from app.audit import logger as audit
 from app.authority.engine import (
     AllowedAction,
     AuthorityDecision,
+    BlockCategory,
     Decision,
     ProposedAction,
     PurchaseFacts,
+    classify_block,
     evaluate,
     evaluate_purchase,
     refund_ceiling,
@@ -2737,16 +2739,38 @@ async def _assess_issue_row(
 
     authority_data = (record.mandate or {}).get("authority")
     authority = Authority(**(authority_data or {"allowed_actions": [], "recovery_budget": "0"}))
-    gate = evaluate(
-        authority, ProposedAction(action=proposal.action, amount=proposal.requested_amount)
-    )
+    engine_proposal = ProposedAction(action=proposal.action, amount=proposal.requested_amount)
+    gate = evaluate(authority, engine_proposal)
 
-    if not gate.approved:
-        decision = "deny"
-    elif proposal.action is AllowedAction.ESCALATE_TO_HUMAN:
-        decision = "escalate"
+    # The engine verdict and the recorded decision are deliberately different things. The
+    # engine says whether the action may run; the decision says how the case should proceed.
+    # A block the owner could cure by delegating (never delegated / expired / above ceiling /
+    # over budget) is recorded as an escalation with the delegation offered — per the refund
+    # workflow's authority rules — while a deployment-policy refusal or a malformed proposal
+    # is recorded as the honest denial it is. The engine itself is never re-implemented here:
+    # classify_block re-derives the same first-failure-wins outcome from the same inputs.
+    if gate.approved:
+        decision = "escalate" if proposal.action is AllowedAction.ESCALATE_TO_HUMAN else "allow"
+        decision_reason = gate.reason
     else:
-        decision = "allow"
+        category = classify_block(authority, engine_proposal, gate)
+        if category is BlockCategory.AUTHORITY_GAP:
+            decision = "escalate"
+            decision_reason = (
+                f"{gate.reason} That is an authority gap rather than a refusal: the mission's "
+                f"owner can delegate '{proposal.action.value}' — bounded by this deployment's "
+                "ceiling — and the issue can then be reassessed, or it can be routed to manual "
+                "review. Nothing has been executed."
+            )
+        elif category is BlockCategory.DEPLOYMENT_POLICY:
+            decision = "deny"
+            decision_reason = (
+                f"{gate.reason} Enabling that switch is an operator decision no delegation can "
+                "make; the issue can still be routed to manual review. Nothing has been executed."
+            )
+        else:
+            decision = "deny"
+            decision_reason = gate.reason
 
     assessment = existing or ResolutionAssessmentRecord(
         issue_id=issue.issue_id,
@@ -2760,10 +2784,10 @@ async def _assess_issue_row(
     assessment.requested_amount = proposal.requested_amount
     assessment.currency = proposal.currency
     assessment.confidence = proposal.confidence
-    assessment.needs_escalation = proposal.needs_escalation
+    assessment.needs_escalation = proposal.needs_escalation or decision == "escalate"
     assessment.proposal_source = proposal.source
     assessment.authority_decision = decision
-    assessment.decision_reason = gate.reason
+    assessment.decision_reason = decision_reason
     if existing is None:
         db.add(assessment)
 
@@ -2883,6 +2907,26 @@ async def reassess_issue(
         await db.flush()
 
     return await _assess_issue_row(record, order, issue, db, existing=existing)
+
+
+@router.post("/{mission_id}/order/issues/{issue_id}/reassess", response_model=dict)
+async def reassess_order_issue(
+    mission_id: str,
+    issue_id: str,
+    current_user: UserRecord | None = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-run an issue's assessment against the mandate as it reads NOW (M22).
+
+    `/assess` is deliberately one-shot per issue; reassessment is the exception for the one
+    situation it cannot serve — an issue whose proposal was blocked by an authority gap,
+    where the remedy is a delegation the owner makes afterwards. The guards are reassess_issue's
+    own: the issue must already be assessed, must not be waiting on an unanswered question,
+    and must not be under active manual review. The same engine, the same model call, the same
+    audit discipline — and still nothing is executed here.
+    """
+    return await reassess_issue(mission_id, issue_id, current_user, db)
 
 
 # --------------------------------------------------------------------------- #

@@ -997,7 +997,8 @@ async def test_two_issues_are_assessed_and_resolved_independently(
         assert len(refund_api.create_calls) == 1
 
         # S38/S39: B is assessed with NO replacement delegation, so the Authority Engine
-        # denies B's own proposal — evaluated for the SELECTED issue, without touching A.
+        # escalates B's own proposal as an authority gap — evaluated for the SELECTED issue,
+        # without touching A.
         assert (await _assess(client, mission_id, b_id)).status_code == 200
         issues = await _issues(client, mission_id)
         b_row = next(i for i in issues if i["issue_id"] == b_id)
@@ -1012,8 +1013,9 @@ async def test_two_issues_are_assessed_and_resolved_independently(
         assert len(await _rows(test_session, RefundRecord, mission_id)) == 1
         assert await _rows(test_session, ReplacementRecord, mission_id) == []
 
-        # The assessment froze B's deny: delegating replacement afterwards does not resurrect
-        # it — the executor re-checks the assessment's own recorded decision and refuses.
+        # The assessment froze B's escalated gap: delegating replacement afterwards does not
+        # resurrect it — the executor re-checks the assessment's own recorded decision
+        # ('escalate' is not 'allow') and refuses.
         assert (await _delegate(client, mission_id, ["request_replacement"])).status_code == 200
         still_denied = await _resolve(client, mission_id, b_id)
         assert still_denied.status_code == 400

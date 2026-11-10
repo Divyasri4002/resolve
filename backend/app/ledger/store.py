@@ -80,6 +80,34 @@ class VersionInfo:
     is_delete_marker: bool
 
 
+@dataclass(frozen=True)
+class ObjectLockConfiguration:
+    """The bucket's Object Lock configuration (GET /?object-lock).
+
+    `enabled` is the ObjectLockEnabled element ("Enabled"); `mode`/`days`/`years` come
+    from the optional Rule/DefaultRetention — a lock-enabled bucket with no default
+    retention reports enabled=True with all three None, which the WORM policy treats as
+    a misconfiguration (every version written before a default is set is unprotected).
+    """
+
+    enabled: bool
+    mode: str | None
+    days: int | None
+    years: int | None
+
+
+@dataclass(frozen=True)
+class LifecycleRule:
+    """One bucket lifecycle rule (GET /?lifecycle). Only the deletion-relevant shape
+    is surfaced: an Enabled rule carrying an Expiration or NoncurrentVersionExpiration
+    element can purge object versions once their retention expires, which would break
+    the verifier's oldest-first chain walk — the WORM policy refuses such rules."""
+
+    status: str
+    expires: bool
+    expires_noncurrent: bool
+
+
 _EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
@@ -272,10 +300,95 @@ class S3ObjectStore:
             raise _classify_get_error(response.status_code, "LIST")
         return _parse_versions_xml(response.text, self._head_key)
 
+    # ------------------------------------------------- bucket policy queries (4.6.3) --
+    async def get_bucket_versioning(self) -> str:
+        """GET /?versioning — "Enabled", "Suspended", or "" when never configured."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await self._request(
+                client, "GET", query="versioning", bucket_level=True
+            )
+        if response.status_code != 200:
+            raise _classify_get_error(response.status_code, "VERSIONING-GET")
+        return _first_text(response.text, ("Status",)) or ""
+
+    async def get_bucket_object_lock_configuration(self) -> ObjectLockConfiguration | None:
+        """GET /?object-lock — None when the bucket has no Object Lock configuration
+        (AWS answers 404 NoSuchObjectLockConfiguration; the absence decision belongs
+        to the caller, which must refuse publication on it)."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await self._request(
+                client, "GET", query="object-lock", bucket_level=True
+            )
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise _classify_get_error(response.status_code, "OBJECT-LOCK-GET")
+        enabled = (_first_text(response.text, ("ObjectLockEnabled",)) or "") == "Enabled"
+        return ObjectLockConfiguration(
+            enabled=enabled,
+            mode=_first_text(response.text, ("Mode",)),
+            days=_first_int(response.text, ("Days",)),
+            years=_first_int(response.text, ("Years",)),
+        )
+
+    async def get_bucket_lifecycle_rules(self) -> list[LifecycleRule]:
+        """GET /?lifecycle — [] when no lifecycle configuration exists (404)."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await self._request(
+                client, "GET", query="lifecycle", bucket_level=True
+            )
+        if response.status_code == 404:
+            return []
+        if response.status_code != 200:
+            raise _classify_get_error(response.status_code, "LIFECYCLE-GET")
+        root = ElementTree.fromstring(response.text)
+        namespace = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
+
+        def _find(node: ElementTree.Element, name: str) -> ElementTree.Element | None:
+            tag = f"{{{namespace}}}{name}" if namespace else name
+            return node.find(tag)
+
+        rules: list[LifecycleRule] = []
+        for node in root:
+            if node.tag.split("}")[-1] != "Rule":
+                continue
+            status_node = _find(node, "Status")
+            expiration = _find(node, "Expiration") is not None
+            noncurrent = _find(node, "NoncurrentVersionExpiration") is not None
+            rules.append(
+                LifecycleRule(
+                    status=status_node.text if status_node is not None and status_node.text else "",
+                    expires=expiration,
+                    expires_noncurrent=noncurrent,
+                )
+            )
+        return rules
+
 
 def _header(response: httpx.Response, name: str) -> str | None:
     value = response.headers.get(name)
     return value.strip() if value else None
+
+
+def _first_text(xml_text: str, names: tuple[str, ...]) -> str | None:
+    """The text of the FIRST element whose local name matches, anywhere in the document
+    (namespace-agnostic — provider XML uses the S3 namespace but its form varies)."""
+    root = ElementTree.fromstring(xml_text)
+    for name in names:
+        for node in root.iter():
+            if node.tag.split("}")[-1] == name and node.text:
+                return node.text.strip()
+    return None
+
+
+def _first_int(xml_text: str, names: tuple[str, ...]) -> int | None:
+    text = _first_text(xml_text, names)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _classify_get_error(status_code: int, operation: str) -> ObjectStoreError:

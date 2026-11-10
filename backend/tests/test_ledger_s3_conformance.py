@@ -68,6 +68,7 @@ from app.ledger.store import (
     S3ObjectStore,
     TransportFailure,
 )
+from app.ledger.worm import PermissiveWormPolicy
 from app.ledger.verify import (
     CURRENCY_CURRENT,
     VERDICT_HEALTHY,
@@ -266,7 +267,8 @@ async def test_s9_real_publisher_end_to_end_on_real_minio():
         await sb.run_ledger_install()
         sb.sessions = sb.app_engine()
         store = make_store(unique_key())
-        publisher = Publisher(sb.sessions, store, lease_seconds=60.0)
+        publisher = Publisher(sb.sessions, store, worm=PermissiveWormPolicy(),
+                              lease_seconds=60.0)
 
         from app.models.db_models import PurchaseAuthorizationRecord
         from sqlalchemy import text
@@ -386,7 +388,8 @@ async def test_s10_observe_to_write_race_on_the_divergent_provider_halts_never_a
             def __getattr__(self, name):
                 return getattr(self._store, name)
 
-        publisher = Publisher(sb.sessions, DestroyAfterObserve(inner), lease_seconds=60.0)
+        publisher = Publisher(sb.sessions, DestroyAfterObserve(inner),
+                              worm=PermissiveWormPolicy(), lease_seconds=60.0)
 
         from app.models.db_models import PurchaseAuthorizationRecord
 
@@ -509,7 +512,8 @@ async def _sandbox_with_publisher(store):
     await sb.run_role_separation()
     await sb.run_ledger_install()
     sb.sessions = sb.app_engine()
-    return sb, Publisher(sb.sessions, store, lease_seconds=60.0)
+    return sb, Publisher(sb.sessions, store, worm=PermissiveWormPolicy(),
+                         lease_seconds=60.0)
 
 
 async def _assert_destroyed_anchor_containment(sb, store) -> None:

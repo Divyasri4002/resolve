@@ -417,10 +417,12 @@ async def test_golden_lifecycle_from_natural_language_to_an_audited_outcome(
         issues = await _issues(client, mission_id)
         assert len(issues) == 1
         refund_issue_id = issues[0]["issue_id"]
-        # The model PROPOSED a refund. The buyer had never delegated one, so the Engine denied it.
+        # The model PROPOSED a refund. The buyer had never delegated one, so the assessment
+        # escalated the authority gap (delegation offered, nothing executed) and the fresh
+        # Engine gate refused the resolution attempt.
         assert issues[0]["issue_type"] == "damaged"
         assert issues[0]["assessment"]["proposed_action"] == "request_refund"
-        assert issues[0]["assessment"]["authority_decision"] == "deny"
+        assert issues[0]["assessment"]["authority_decision"] == "escalate"
         assert issues[0]["resolution"]["resolution_state"] == "denied"
         assert turn["authority_decision"]["approved"] is False
         # S10 — CASE A: a denied proposal reaches no provider at all.
@@ -475,7 +477,7 @@ async def test_golden_lifecycle_from_natural_language_to_an_audited_outcome(
         assert _tools(turn) == ["assess_issue", "resolve_issue"]
         repl = next(i for i in await _issues(client, mission_id) if i["issue_id"] == repl_issue_id)
         assert repl["assessment"]["proposed_action"] == "request_replacement"
-        assert repl["assessment"]["authority_decision"] == "deny"
+        assert repl["assessment"]["authority_decision"] == "escalate"
         # S12 — delegating a refund never delegated a replacement; the Engine decides action by action.
         assert repl["resolution"]["resolution_state"] == "denied"
         assert await _rows(test_session, ReplacementRecord, mission_id) == []
@@ -720,7 +722,8 @@ async def test_delegation_may_narrow_the_ceiling_but_never_raise_it(
         assert (await _delegate(client, mission_id, ["execute_payment"])).status_code == 422
 
         # A narrower ceiling is accepted — and it binds. The product is priced above ₹1, so the
-        # Engine must deny the same proposal it would otherwise allow.
+        # Engine must escalate the same proposal it would otherwise allow: an above-ceiling
+        # remedy is an authority gap the owner can cure, not a deployment refusal.
         assert Decimal(str(chosen["extracted_price"])) > Decimal("1")
         limited = await _delegate(client, mission_id, ["request_refund"], refund_limit="1")
         assert limited.status_code == 200, limited.text
@@ -731,7 +734,7 @@ async def test_delegation_may_narrow_the_ceiling_but_never_raise_it(
         assert Decimal(str(assessed.json()["requested_amount"])) == Decimal(
             str(chosen["extracted_price"])
         )
-        assert assessed.json()["authority_decision"] == "deny"
+        assert assessed.json()["authority_decision"] == "escalate"
         denied = await _resolve(client, mission_id, issue_id)
         assert denied.status_code == 400
         assert refund_api.create_calls == []

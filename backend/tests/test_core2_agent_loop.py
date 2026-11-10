@@ -294,7 +294,9 @@ async def test_golden_conversational_lifecycle(
     issues = await _issues(async_client, mission_id)
     assert issues[0]["issue_type"] == "damaged"
     assert issues[0]["assessment"]["proposed_action"] == "request_refund"
-    assert issues[0]["assessment"]["authority_decision"] == "deny"
+    # An undelegated remedy is an authority gap, not a refusal: the assessment escalates and
+    # offers delegation; the resolution row still records the orchestrator's own refusal.
+    assert issues[0]["assessment"]["authority_decision"] == "escalate"
     assert issues[0]["resolution"]["resolution_state"] == "denied"
     assert refund_api.create_calls == []
 

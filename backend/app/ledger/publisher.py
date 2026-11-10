@@ -67,6 +67,7 @@ from app.ledger.store import (
     ServerError,
     TransportFailure,
 )
+from app.ledger.worm import S3WormPolicy, WormPolicy
 
 logger = logging.getLogger("app.ledger.publisher")
 
@@ -124,6 +125,7 @@ class Publisher:
         sessionmaker: async_sessionmaker,
         store: S3ObjectStore,
         *,
+        worm: WormPolicy,
         lease_seconds: float = 60.0,
         max_attempts: int = MAX_CAS_ATTEMPTS,
         sleep=asyncio.sleep,
@@ -131,6 +133,11 @@ class Publisher:
     ) -> None:
         self._sessionmaker = sessionmaker
         self._store = store
+        # The WORM policy is REQUIRED, not defaulted: every construction site must
+        # state its enforcement posture explicitly (4.6.3 — production wires
+        # S3WormPolicy; only tests may construct PermissiveWormPolicy, and the wiring
+        # test pins that).
+        self._worm = worm
         self._lease_seconds = lease_seconds
         self._max_attempts = max_attempts
         self._sleep = sleep
@@ -316,6 +323,23 @@ class Publisher:
             and pin.next_eligible_at > now
         ):
             return "skipped-backoff"
+
+        # WORM gate (4.6.3): before any store interaction this cycle, the bucket must
+        # satisfy the evidence-protection policy — versioning Enabled, Object Lock
+        # COMPLIANCE with a default retention at or above the floor, and no Enabled
+        # lifecycle rule that could expire object versions. It sits after the
+        # terminal-status and backoff fast paths so a halted/reconcile pin surfaces
+        # ITS reason to the operator, not a store misconfiguration. On failure the
+        # cycle refuses WITHOUT touching the pin or the anchor: no status write, no
+        # observation, no write attempt, no bootstrap.
+        verdict = await self._worm.verify(self._store)
+        if not verdict.ok:
+            logger.error(
+                "ledger ALARM: evidence bucket fails the WORM protection policy; "
+                "publication refused and the trust anchor left untouched — %s",
+                "; ".join(verdict.failures),
+            )
+            return "refused-worm-policy"
 
         db_head = await self._db_head_seq()
         if db_head < pin.last_published_seq:
@@ -679,15 +703,26 @@ def build_store(settings) -> S3ObjectStore:
     )
 
 
+def build_publisher(sessionmaker: async_sessionmaker, settings) -> Publisher:
+    """
+    The production wiring: the WORM enforcement policy is mandatory and non-permissive.
+    main.py (and every deployment surface) must construct the publisher through this
+    function so no deployment path can accidentally wire a permissive policy.
+    """
+    return Publisher(
+        sessionmaker,
+        build_store(settings),
+        worm=S3WormPolicy(settings.ledger_worm_min_retention_days),
+        lease_seconds=settings.ledger_publisher_lease_seconds,
+    )
+
+
 async def run_forever(sessionmaker: async_sessionmaker, settings) -> None:
     """
     The lifespan background loop. Persisted state is the only source of truth; a crash
     and restart resumes from the pin exactly where the previous process stopped.
     """
-    store = build_store(settings)
-    publisher = Publisher(
-        sessionmaker, store, lease_seconds=settings.ledger_publisher_lease_seconds
-    )
+    publisher = build_publisher(sessionmaker, settings)
     logger.info(
         "ledger publisher: started (poll=%ss, lease=%ss)",
         settings.ledger_publisher_poll_seconds, settings.ledger_publisher_lease_seconds,
