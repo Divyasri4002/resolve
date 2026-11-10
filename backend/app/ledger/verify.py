@@ -337,7 +337,17 @@ async def verify(sessionmaker: async_sessionmaker, store: S3ObjectStore | None) 
 
         if head is None:
             if live_count == 0:
-                if facts.events:
+                if facts.pin_present and (facts.pin_seq or 0) > 0:
+                    report.problems.append(
+                        f"the publish pin records {facts.pin_seq} published event(s) but no "
+                        "anchor version survives — the trust anchor was destroyed; never "
+                        "re-bootstrap, operator reconciliation required"
+                    )
+                    logger.error(
+                        "ledger ALARM: anchor destroyed (pin seq %s, zero live versions)",
+                        facts.pin_seq,
+                    )
+                elif facts.events:
                     report.notes.append(
                         f"{len(facts.events)} database events await first publication"
                     )

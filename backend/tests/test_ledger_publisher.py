@@ -734,3 +734,43 @@ async def test_g3_unverifiable_lineage_consumes_an_attempt_and_recovers(pub_pg):
     assert pin["published"] == 2 and pin["attempts"] == 0
     assert pin["version_id"] == "vid-0002"
     assert pin["status"] == "idle"
+
+
+async def test_g4_the_verifier_reads_a_destroyed_anchor_as_destroyed(pub_pg):
+    """
+    The verifier's blind spot, closed: a pin that records published events while the
+    external store holds NOTHING is not 'awaiting first publication' — it is a
+    destroyed trust anchor and must be UNHEALTHY (the S12 window's read-side twin).
+    The genuine pre-publication state — pin at 0, events pending, no anchor — stays a
+    healthy note.
+    """
+    sb, clock = pub_pg, FakeClock()
+    store = FakeStore()
+    publisher = make_publisher(sb, store, clock)
+    await seed_event(sb, "g4a")
+    await publisher.run_cycle()  # pin (1, vid-0001)
+    await seed_event(sb, "g4b")
+    await publisher.run_cycle()  # pin (2, vid-0002)
+
+    # Every version destroyed (bucket-admin deletion): the store is empty while the
+    # pin still claims two published events.
+    store.clear()
+    assert await store.get_head() is None
+    assert await store.list_head_versions() == []
+    report = await verify(sb.sessions, store)
+    assert report.verdict == VERDICT_UNHEALTHY, report.summary_lines()
+    assert any("anchor version survives" in problem for problem in report.problems), (
+        report.problems
+    )
+    assert not any("await first publication" in note for note in report.notes)
+    decision = await submission_currency(sb.sessions, store)
+    assert decision.state == "not-current"
+    assert "absent" in decision.reason
+
+    # The genuine pre-publication state — pin rewound to 0, events pending, no
+    # anchor — is still the healthy note, not a problem.
+    await set_pin(sb, last_published_seq=0, last_version_id=None, last_validator=None,
+                  last_head_hash=canonical.GENESIS_HASH)
+    report = await verify(sb.sessions, store)
+    assert report.verdict == VERDICT_HEALTHY, report.summary_lines()
+    assert any("await first publication" in note for note in report.notes), report.notes

@@ -26,6 +26,22 @@ bucket, and proves the exact semantics the publisher and verifier depend on:
       accepts the mid-race conditional PUT and creates a fresh object (the S5
       divergence); the publisher must refuse to adopt the history-less orphan and
       halt (needs RESOLVE_PG_ADMIN_URL as well)
+  S11 the FINAL-CHALLENGE deletion race, placed after a completed lineage-verified
+      publication and before the next cycle: the next observation finds no head and
+      refuses (refused-missing-head) BEFORE any PUT — MinIO creates no new head, the
+      pin never moves (needs RESOLVE_PG_ADMIN_URL as well)
+  S12 the only window where destruction lands after a successful lineage check —
+      between a truthful lineage listing and the pin-advance commit: the pin DOES
+      advance onto evidence destroyed moments later (the honest residual); contained
+      fail-closed by the next cycle's refusal, the currency gate and the verifier
+      (needs RESOLVE_PG_ADMIN_URL as well)
+
+The FINAL-CHALLENGE mandated literal interleaving (read head, verify pinned
+VersionId, delete everything, then let the conditional PUT execute) cannot be
+constructed on this write path: Publisher._cas orders the conditional PUT BEFORE the
+lineage verification, so no lineage success ever authorizes a later PUT. S10 covers
+the destruction window between observation and PUT; S12 covers the only window after
+lineage — lineage-ok to pin-commit — and reports its outcome without spin.
 
 PROVIDER IDENTITY: this battery is evidence about MinIO. It must never be reported as
 AWS S3 conformance. The bucket is a disposable test bucket; nothing here touches
@@ -423,6 +439,207 @@ async def test_s10_observe_to_write_race_on_the_divergent_provider_halts_never_a
         decision = await submission_currency(sb.sessions, inner)
         assert decision.state == "not-current"
         assert "pin" in decision.reason
+    finally:
+        if hasattr(sb, "sessions"):
+            await sb.dispose_engines()
+        await sb.drop()
+
+
+# --------------------------------------------------------------------------- #
+# S11/S12: the FINAL-CHALLENGE deletion race against the real publisher         #
+# --------------------------------------------------------------------------- #
+
+
+async def _read_pin(sb) -> dict:
+    from sqlalchemy import text
+
+    async with sb.sessions() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT last_published_seq, last_version_id, publish_status "
+                    "FROM ledger_publish_state WHERE id = 1"
+                )
+            )
+        ).one()
+    return {"seq": row[0], "version_id": row[1], "status": row[2]}
+
+
+async def _seed(sb, prefix: str, tag: str) -> None:
+    from sqlalchemy import text
+
+    from app.models.db_models import PurchaseAuthorizationRecord
+
+    async with sb.sessions() as session:
+        pa = PurchaseAuthorizationRecord(
+            order_id=f"ord_{prefix}_{tag}", mission_id=f"m_{prefix}_{tag}",
+            user_id=f"user_{prefix}", authority_decision="approved",
+            decision_reason="seed row", status="authorized",
+        )
+        session.add(pa)
+        await session.commit()
+        await session.execute(
+            text("UPDATE purchase_authorizations SET status = 'purchase_failed' "
+                 "WHERE authorization_id = :pk"),
+            {"pk": pa.authorization_id},
+        )
+        await session.commit()
+
+
+async def _destroy_every_version(store: S3ObjectStore) -> None:
+    """Signed DELETE per version — the adversarial actor holds bucket-admin rights."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=store._timeout) as client:
+        for version in await store.list_head_versions():
+            response = await store._request(
+                client, "DELETE", query="versionId=" + quote(version.version_id, safe="")
+            )
+            assert response.status_code in (200, 204)
+
+
+async def _sandbox_with_publisher(store):
+    """Full ledger sandbox wired to the REAL publisher over the given store."""
+    from tests.ledger_sandbox import LedgerSandbox
+
+    sb = LedgerSandbox()
+    await sb.prepare_roles()
+    await sb.create()
+    await sb.bootstrap()
+    await sb.run_role_separation()
+    await sb.run_ledger_install()
+    sb.sessions = sb.app_engine()
+    return sb, Publisher(sb.sessions, store, lease_seconds=60.0)
+
+
+async def _assert_destroyed_anchor_containment(sb, store) -> None:
+    """The verifier and the currency gate must both name the destroyed anchor."""
+    report = await verify(sb.sessions, store)
+    assert report.verdict == VERDICT_UNHEALTHY, report.summary_lines()
+    assert any("anchor version survives" in problem for problem in report.problems), (
+        report.problems
+    )
+    decision = await submission_currency(sb.sessions, store)
+    assert decision.state == "not-current"
+    assert "absent" in decision.reason
+
+
+async def test_s11_destruction_after_a_completed_lineage_verified_publication_refuses_before_any_put():
+    """
+    The FINAL-CHALLENGE deletion race, placed where the write path allows it: after a
+    fully completed, lineage-verified publication and before the next cycle. The next
+    cycle's observation finds NO head and refuses (refused-missing-head) BEFORE any
+    PUT — MinIO creates no new head, the pin never moves, and the destroyed anchor is
+    named by the verifier and refused by the currency gate.
+    """
+    from tests.ledger_sandbox import ADMIN_URL
+
+    if not ADMIN_URL:
+        pytest.skip("RESOLVE_PG_ADMIN_URL is not set; S11 needs an isolated PostgreSQL 16")
+
+    store = make_store(unique_key())
+    sb, publisher = await _sandbox_with_publisher(store)
+    try:
+        await _seed(sb, "s11", "a")
+        assert await publisher.run_cycle() == "idle"  # genesis on the real bucket
+        await _seed(sb, "s11", "b")
+        assert await publisher.run_cycle() == "idle"  # lineage-verified advance
+        pinned = await _read_pin(sb)
+        assert pinned["seq"] == 2 and pinned["status"] == "idle" and pinned["version_id"]
+        assert pinned["version_id"] in {
+            v.version_id for v in await store.list_head_versions()
+        }
+
+        # The mandated deletion, after a successful lineage verification completed a
+        # publication: the pinned version and every other version are destroyed.
+        await _destroy_every_version(store)
+        assert await store.list_head_versions() == []
+
+        await _seed(sb, "s11", "c")
+        assert await publisher.run_cycle() == "refused-missing-head"
+        after = await _read_pin(sb)
+        assert after["seq"] == pinned["seq"]
+        assert after["version_id"] == pinned["version_id"]
+        assert after["status"] == "halted"
+
+        # No conditional PUT executed: MinIO did NOT create a new head.
+        assert await store.get_head() is None
+        assert await store.list_head_versions() == []
+
+        await _assert_destroyed_anchor_containment(sb, store)
+    finally:
+        if hasattr(sb, "sessions"):
+            await sb.dispose_engines()
+        await sb.drop()
+
+
+async def test_s12_destruction_between_lineage_verification_and_pin_commit_advances_then_halts():
+    """
+    The ONLY window where destruction lands after a successful lineage verification:
+    the lineage listing is obtained truthfully (the pinned version present, verdict
+    'ok') and every version is destroyed before the pin advance commits. The pin DOES
+    advance onto evidence that no longer exists — the residual this challenge mandates
+    reporting honestly: the deletion-to-PUT race is closed, the lineage-to-commit
+    window is not. Containment is immediate and fail-closed: the next cycle observes
+    no head and halts (never re-bootstrap), the currency gate refuses new submissions,
+    and the verifier names the destroyed anchor. Closing this window structurally
+    requires provider-side immutability (S3 Object Lock COMPLIANCE mode); no
+    conditional DELETE exists in S3 to serialize a writer against a deleter, and none
+    is invented here.
+    """
+    from tests.ledger_sandbox import ADMIN_URL
+
+    if not ADMIN_URL:
+        pytest.skip("RESOLVE_PG_ADMIN_URL is not set; S12 needs an isolated PostgreSQL 16")
+
+    inner = make_store(unique_key())
+
+    class DestroyAfterTruthfulListing:
+        """The first lineage listing is truthful; every version is destroyed before
+        it returns, landing the deletion between lineage 'ok' and the pin commit."""
+
+        def __init__(self, target: S3ObjectStore) -> None:
+            self._target = target
+            self.armed = True
+
+        async def list_head_versions(self):
+            versions = await self._target.list_head_versions()
+            if self.armed:
+                self.armed = False
+                await _destroy_every_version(self._target)
+            return versions
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    sb, publisher = await _sandbox_with_publisher(DestroyAfterTruthfulListing(inner))
+    try:
+        await _seed(sb, "s12", "a")
+        assert await publisher.run_cycle() == "idle"  # genesis: lineage skipped (seq 0)
+        assert (await _read_pin(sb))["seq"] == 1
+
+        await _seed(sb, "s12", "b")
+        assert await publisher.run_cycle() == "idle"  # PUT ok, lineage 'ok', pin advanced
+        pinned = await _read_pin(sb)
+        assert pinned["seq"] == 2 and pinned["status"] == "idle"
+        assert pinned["version_id"]  # the pin advanced onto the now-destroyed version
+
+        # The destruction really happened: zero versions survive, including the one
+        # the pin now records.
+        assert await inner.get_head() is None
+        assert await inner.list_head_versions() == []
+
+        # The next cycle refuses on the absent head and never re-bootstraps; the pin
+        # keeps its (now evidence-less) position and halts.
+        await _seed(sb, "s12", "c")
+        assert await publisher.run_cycle() == "refused-missing-head"
+        after = await _read_pin(sb)
+        assert after["seq"] == pinned["seq"]
+        assert after["version_id"] == pinned["version_id"]
+        assert after["status"] == "halted"
+        assert await inner.get_head() is None  # still nothing was re-created
+
+        await _assert_destroyed_anchor_containment(sb, inner)
     finally:
         if hasattr(sb, "sessions"):
             await sb.dispose_engines()
