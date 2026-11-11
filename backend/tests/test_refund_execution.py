@@ -30,6 +30,7 @@ from app.models.db_models import (
     AuditLogRecord,
     MissionRecord,
     RefundRecord,
+    ReplacementRecord,
     ResolutionAssessmentRecord,
 )
 from app.routers import missions as missions_module
@@ -385,7 +386,8 @@ async def test_guards_reject_without_touching_provider(
         resp = await _refund(client, mission_id, issue_id)
         assert resp.status_code == 400 and "assessed" in resp.json()["detail"]
 
-        # TEST 8: assessment proposed a replacement -> cannot execute a refund
+        # TEST 8: the assessment proposed a replacement (a recommendation only) — the
+        # mandate delegates no refund authority, so the live execution-time gate refuses.
         replacement_issue = (
             await client.post(
                 f"/missions/{mission_id}/order/issues",
@@ -405,17 +407,17 @@ async def test_guards_reject_without_touching_provider(
 
         # TEST 9: Authority Engine block on an undelegated refund — an authority gap is
         # ESCALATED on the assessment row (delegation offered); the refund endpoint still
-        # refuses because execution requires an explicit allow.
+        # refuses because the live mandate at execution time carries no refund delegation.
         await _set_mandate_authority(test_session, mission_id, [], "0")
         denied = await _assess(client, mission_id, issue_id)
         assert denied["authority_decision"] == "escalate"
         resp = await _refund(client, mission_id, issue_id)
-        assert resp.status_code == 400 and "requires an explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and "never delegated" in resp.json()["detail"]
 
-        # TEST 10: ESCALATE decision on a refund proposal blocks execution. The Task 10
-        # pipeline maps an approved escalate_to_human ACTION to decision "escalate"; a
-        # refund proposal that comes back with an escalate decision must be rejected too.
-        # The stored decision is set in test data — the engine's policy code is untouched.
+        # TEST 10: a stored ALLOW cannot authorize an undelegated remedy. The mandate is
+        # empty, so the genuine assessment records "escalate"; even after the stored row is
+        # tampered UP to "allow" in test data (the engine's policy code is untouched), the
+        # live execution-time gate consults the mandate, not the row, and refuses.
         esc_issue = (
             await client.post(
                 f"/missions/{mission_id}/order/issues",
@@ -426,19 +428,20 @@ async def test_guards_reject_without_touching_provider(
                 },
             )
         ).json()["issue_id"]
-        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
+        await _set_mandate_authority(test_session, mission_id, [], "0")
         esc_assess = await _assess(client, mission_id, esc_issue)
         assert esc_assess["proposed_action"] == "request_refund"
-        assert esc_assess["authority_decision"] == "allow"
+        assert esc_assess["authority_decision"] == "escalate"
         async with test_session() as session:
             row = await session.get(ResolutionAssessmentRecord, esc_assess["assessment_id"])
-            row.authority_decision = "escalate"
+            row.authority_decision = "allow"
             await session.commit()
         resp = await _refund(client, mission_id, esc_issue)
-        assert resp.status_code == 400 and "requires an explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and "never delegated" in resp.json()["detail"]
 
         # Execution-time re-gate: a fresh issue gets a genuine ALLOWing assessment, then
         # the delegation is revoked — the stored checks pass, the fresh gate call refuses.
+        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
         rg_issue = (
             await client.post(
                 f"/missions/{mission_id}/order/issues",
@@ -968,3 +971,131 @@ async def test_refund_persists_across_restart(
         again = await _refund(client_b, mission_id, issue_id)
         assert again.json()["already_existed"] is True
         assert refund_api.calls["create"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# M22 P5-A: the buyer may choose either remedy — the assessment's proposed_action
+# is a recommendation, the live Authority Engine re-run at execution time is the
+# only authorization source.
+# --------------------------------------------------------------------------- #
+async def test_refund_executes_when_assessment_proposed_replacement(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, refund_api,
+    install_fake_reasoning,
+):
+    client, test_session, setup = await _refundable_setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay
+    )
+    async with client:
+        mission_id = await setup(client)
+        install_fake_reasoning(
+            {
+                "issue_assessment": "A replacement would fit, but the buyer decides.",
+                "proposed_action": "request_replacement",
+                "reasoning_summary": "Replacement proposed by the resolution model.",
+                "requested_amount": None,
+                "currency": "INR",
+                "confidence": 0.85,
+                "needs_escalation": False,
+            }
+        )
+        issue_id = await _confirmed_order_with_issue(client, mission_id)
+        # Only refund authority is delegated: the replacement PROPOSAL is an authority
+        # gap -> escalated on the row, never a deny — and it does not block the refund.
+        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
+        assessment = await _assess(client, mission_id, issue_id)
+        assert assessment["proposed_action"] == "request_replacement"
+        assert assessment["authority_decision"] == "escalate"
+
+        resp = await _refund(client, mission_id, issue_id)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "verified"
+        assert data["amount_paise"] == 39900
+        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 0}
+
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        assert issues[0]["refund"]["status"] == "verified"
+        assert issues[0]["replacement"] is None
+        async with test_session() as session:
+            rows = (
+                await session.scalars(
+                    select(ReplacementRecord).where(ReplacementRecord.issue_id == issue_id)
+                )
+            ).all()
+            assert rows == []
+
+
+async def test_remedy_authority_reports_live_verdicts_for_both_remedies(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, refund_api
+):
+    client, test_session, setup = await _refundable_setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay
+    )
+    async with client:
+        mission_id = await setup(client)
+        await _confirmed_order_with_issue(client, mission_id)
+
+        # Undelegated mandate: both remedies blocked, with the live gate's reason.
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        ra = issues[0]["remedy_authority"]
+        assert ra["request_refund"]["decision"] == "blocked"
+        assert "never delegated" in ra["request_refund"]["reason"]
+        assert ra["request_replacement"]["decision"] == "blocked"
+        assert "never delegated" in ra["request_replacement"]["reason"]
+
+        # Refund-only delegation: exactly that remedy flips to allowed.
+        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        ra = issues[0]["remedy_authority"]
+        assert ra["request_refund"]["decision"] == "allow"
+        assert ra["request_replacement"]["decision"] == "blocked"
+
+        # Both remedies delegated: both allowed (replacement switch is ON in conftest).
+        await _set_mandate_authority(
+            test_session, mission_id, ["request_refund", "request_replacement"], "1000"
+        )
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        ra = issues[0]["remedy_authority"]
+        assert ra["request_refund"]["decision"] == "allow"
+        assert ra["request_replacement"]["decision"] == "allow"
+
+        # The file-issue response carries the same live verdicts.
+        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
+        dup = await client.post(
+            f"/missions/{mission_id}/order/issues",
+            json={
+                "issue_type": "damaged",
+                "description": "Sealed box arrived crushed. [remedy-payload]",
+                "requested_resolution": "none",
+            },
+        )
+        assert dup.status_code == 200
+        assert dup.json()["remedy_authority"]["request_refund"]["decision"] == "allow"
+
+
+async def test_remedy_authority_refund_blocked_without_verified_payment(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, refund_api
+):
+    client, test_session, setup = await _refundable_setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay
+    )
+    async with client:
+        mission_id = await setup(client)
+        await _confirmed_order_with_issue(client, mission_id)
+        await _set_mandate_authority(test_session, mission_id, ["request_refund"], "1000")
+
+        # Demote the persisted payment (test data only): the refund remedy must report
+        # blocked even though the mandate delegates it — no verified TEST payment exists.
+        async with test_session() as session:
+            rec = await session.get(MissionRecord, mission_id)
+            intent = dict(rec.shopping_intent)
+            payment = dict(intent["payment"])
+            payment["status"] = "failed"
+            intent["payment"] = payment
+            rec.shopping_intent = intent
+            await session.commit()
+
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        ra = issues[0]["remedy_authority"]
+        assert ra["request_refund"]["decision"] == "blocked"
+        assert "verified" in ra["request_refund"]["reason"]

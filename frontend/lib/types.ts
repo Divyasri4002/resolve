@@ -342,6 +342,12 @@ export interface OrderIssue {
     requested_at?: string | null;
     blocks_autonomous_resolution?: boolean;
   };
+  /** M22: live per-remedy Authority verdicts — which remedies the buyer may choose.
+   *  Advisory only; the executor re-checks authority on every click. */
+  remedy_authority?: {
+    request_refund?: { decision: "allow" | "blocked"; reason?: string };
+    request_replacement?: { decision: "allow" | "blocked"; reason?: string };
+  };
   resolution_note?: string;
   agent_message?: string | null;
 }

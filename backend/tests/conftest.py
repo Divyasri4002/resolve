@@ -43,6 +43,7 @@ os.environ["SHOPPING_RETURN_AUTHORITY_ENABLED"] = "true"
 os.environ["RETURN_PROVIDER"] = "none"
 os.environ["SHOPPING_PURCHASE_AUTHORITY_ENABLED"] = "true"
 os.environ["SHOPPING_DEMO_DELIVERY_ENABLED"] = "false"
+os.environ["LINKAGE_INTEGRATION_SECRET"] = ""
 
 import pytest
 from decimal import Decimal

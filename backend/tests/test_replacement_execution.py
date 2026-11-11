@@ -464,13 +464,14 @@ async def test_guards_reject_before_any_provider_call(
         resp = await _replace(client, mission_id, plain_issue)
         assert resp.status_code == 400 and "assessed" in resp.json()["detail"]
 
-        # 1 (end-to-end): authority disabled -> assessment denies, endpoint refuses
+        # 1 (end-to-end): authority disabled -> assessment denies, the live execution-time
+        # gate refuses regardless of what the stored assessment row says
         _set_replacement_switch(monkeypatch, enabled=False)
         disabled_issue = await _issue(client, mission_id)
         denied_assessment = await _assess(client, mission_id, disabled_issue)
         assert denied_assessment["authority_decision"] == "deny"
         resp = await _replace(client, mission_id, disabled_issue)
-        assert resp.status_code == 400 and "explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and "at execution time" in resp.json()["detail"]
         _set_replacement_switch(monkeypatch, enabled=True)
 
         # 4: a refund proposal cannot use the replacement endpoint
@@ -496,13 +497,18 @@ async def test_guards_reject_before_any_provider_call(
         resp = await _replace(client, mission_id, return_issue)
         assert resp.status_code == 400 and "request_replacement" in resp.json()["detail"]
 
-        # 7: an ESCALATE decision on a replacement proposal blocks execution
+        # 7: a stored ALLOW cannot authorize an undelegated remedy. The mandate carries no
+        # replacement delegation, so the genuine assessment records "escalate"; even after
+        # the stored row is tampered UP to "allow" in test data (the engine's policy code
+        # is untouched), the live execution-time gate consults the mandate and refuses.
         install_fake_reasoning(_replacement_proposal())
-        esc_issue = await _authorized_replacement_issue(client, test_session, mission_id)
-        assessment_id = (await _assess(client, mission_id, esc_issue))["assessment_id"]
-        await _set_assessment_decision(test_session, assessment_id, "escalate")
+        esc_issue = await _issue(client, mission_id)
+        await _delegate(test_session, mission_id, [])
+        esc_assess = await _assess(client, mission_id, esc_issue)
+        assert esc_assess["authority_decision"] == "escalate"
+        await _set_assessment_decision(test_session, esc_assess["assessment_id"], "allow")
         resp = await _replace(client, mission_id, esc_issue)
-        assert resp.status_code == 400 and "explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and "never delegated" in resp.json()["detail"]
 
         # Execution-time revocation: a fresh, genuinely ALLOWed issue whose delegation is
         # withdrawn afterwards — the stored checks pass, the fresh gate call refuses.
@@ -695,3 +701,84 @@ async def test_no_secret_leakage(
             ).all()
             assert audits
             assert all(secret not in (a.reason or "") for a in audits)
+
+
+# --------------------------------------------------------------------------- #
+# M22 P5-A: the assessment's proposed_action is a recommendation — the buyer may
+# choose either remedy; the live Authority Engine re-run at execution time is the
+# only authorization source.
+# --------------------------------------------------------------------------- #
+async def test_replacement_executes_when_assessment_proposed_refund(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+    replacement_provider,
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        install_fake_reasoning(
+            {
+                **_replacement_proposal(),
+                "proposed_action": "request_refund",
+                "requested_amount": 399,
+            }
+        )
+        issue_id = await _issue(client, mission_id, kind="refund")
+        # Only replacement authority is delegated: the refund PROPOSAL is an authority
+        # gap -> escalated on the row, never a deny — and it does not block replacement.
+        await _delegate(test_session, mission_id, ["request_replacement"])
+        assessment = await _assess(client, mission_id, issue_id)
+        assert assessment["proposed_action"] == "request_refund"
+        assert assessment["authority_decision"] == "escalate"
+
+        resp = await _replace(client, mission_id, issue_id)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "requested"
+        assert data["replacement_product_id"] == "item_dove"
+        assert len(replacement_provider.requests) == 1
+
+        issue = [
+            i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+            if i["issue_id"] == issue_id
+        ][0]
+        assert issue["replacement"]["status"] == "requested"
+        assert issue["refund"] is None
+        async with test_session() as session:
+            rows = (
+                await session.scalars(
+                    select(RefundRecord).where(RefundRecord.issue_id == issue_id)
+                )
+            ).all()
+            assert rows == []
+
+
+async def test_remedy_authority_replacement_blocked_when_switch_disabled(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+    replacement_provider, monkeypatch,
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        issue_id = await _issue(client, mission_id)
+        await _delegate(test_session, mission_id, ["request_refund", "request_replacement"])
+
+        # Deployment switch off: the replacement remedy reports blocked even though the
+        # mandate delegates it — the live verdict mirrors the engine, not the mandate alone.
+        _set_replacement_switch(monkeypatch, enabled=False)
+        resp = await client.get(f"/missions/{mission_id}/order/issues")
+        assert resp.status_code == 200, resp.text
+        issues = resp.json()["issues"]
+        ra = next(i for i in issues if i["issue_id"] == issue_id)["remedy_authority"]
+        assert ra["request_replacement"]["decision"] == "blocked"
+        assert ra["request_refund"]["decision"] == "allow"  # delegated + verified payment
+        _set_replacement_switch(monkeypatch, enabled=True)
+
+        resp = await client.get(f"/missions/{mission_id}/order/issues")
+        assert resp.status_code == 200, resp.text
+        issues = resp.json()["issues"]
+        ra = next(i for i in issues if i["issue_id"] == issue_id)["remedy_authority"]
+        assert ra["request_replacement"]["decision"] == "allow"

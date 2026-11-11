@@ -2324,6 +2324,41 @@ class ReportOrderIssueRequest(BaseModel):
         return v
 
 
+def _remedy_authority(record: MissionRecord, order: ResolveOrderRecord) -> dict:
+    """
+    Live per-remedy Authority verdicts for the client, computed by the same engine the
+    executors re-run at execution time. Advisory display only: this lets the buyer see
+    BOTH remedies they may choose between (the assessment's proposal stays a
+    recommendation), while the executor endpoints remain the only path that acts — and
+    they re-evaluate authority on every click.
+    """
+    authority_data = (record.mandate or {}).get("authority")
+    authority = Authority(**(authority_data or {"allowed_actions": [], "recovery_budget": "0"}))
+    payment_data = (record.shopping_intent or {}).get("payment") or {}
+    if payment_data.get("status") != "verified" or not payment_data.get("razorpay_payment_id"):
+        refund_entry = {
+            "decision": "blocked",
+            "reason": "A refund requires a verified Razorpay TEST payment on this mission",
+        }
+    else:
+        amount, _, _ = _canonical_refund_amount(payment_data, order)
+        gate = evaluate(
+            authority, ProposedAction(action=AllowedAction.REQUEST_REFUND, amount=amount)
+        )
+        refund_entry = {
+            "decision": "allow" if gate.approved else "blocked",
+            "reason": gate.reason,
+        }
+    replacement_gate = evaluate(authority, ProposedAction(action=AllowedAction.REQUEST_REPLACEMENT))
+    return {
+        "request_refund": refund_entry,
+        "request_replacement": {
+            "decision": "allow" if replacement_gate.approved else "blocked",
+            "reason": replacement_gate.reason,
+        },
+    }
+
+
 def _issue_response(
     issue: OrderIssueRecord,
     agent_message: str | None = None,
@@ -2333,6 +2368,7 @@ def _issue_response(
     replacement: ReplacementRecord | None = None,
     return_record: ReturnRecord | None = None,
     resolution: ResolutionRecord | None = None,
+    remedy_authority: dict | None = None,
 ) -> dict:
     """Canonical client-facing issue payload — every value read from the persisted row."""
     return {
@@ -2357,6 +2393,7 @@ def _issue_response(
         ),
         "return": _return_response(return_record) if return_record is not None else None,
         "resolution": _resolution_response(resolution) if resolution is not None else None,
+        "remedy_authority": remedy_authority,
         "manual_review": {
             "requested": bool(issue.manual_review_requested),
             "requested_at": (
@@ -2391,10 +2428,11 @@ async def list_order_issues(
 ):
     """The mission's persisted post-purchase issues, oldest first, each with its
     assessment (if any) attached (owner only)."""
-    await _load_mission_for_shopping_action(mission_id, current_user, db)
+    record = await _load_mission_for_shopping_action(mission_id, current_user, db)
     order = await _load_order(db, mission_id)
     if order is None:
         raise HTTPException(status_code=404, detail="No order exists for this mission")
+    remedies = _remedy_authority(record, order)
     issues = await _load_issues(db, mission_id)
     assessments_result = await db.execute(
         select(ResolutionAssessmentRecord).where(
@@ -2429,6 +2467,7 @@ async def list_order_issues(
                 replacement=replacements_by_issue.get(issue.issue_id),
                 return_record=returns_by_issue.get(issue.issue_id),
                 resolution=resolutions_by_issue.get(issue.issue_id),
+                remedy_authority=remedies,
             )
             for issue in issues
         ],
@@ -2480,7 +2519,12 @@ async def report_order_issue(
                 f"Issue {existing.issue_id} was already recorded on order {order.order_id} "
                 "with the same details — nothing new was created."
             )
-            return _issue_response(existing, agent_message=agent_message, already_existed=True)
+            return _issue_response(
+                existing,
+                agent_message=agent_message,
+                already_existed=True,
+                remedy_authority=_remedy_authority(record, order),
+            )
 
     issue = OrderIssueRecord(
         order_id=order.order_id,
@@ -2537,7 +2581,9 @@ async def report_order_issue(
         "no refund, replacement, or merchant action has been initiated. "
         "I've recorded the issue and will review the available resolution options."
     )
-    return _issue_response(issue, agent_message=agent_message)
+    return _issue_response(
+        issue, agent_message=agent_message, remedy_authority=_remedy_authority(record, order)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -3394,23 +3440,10 @@ async def run_refund_executor(
             status_code=400,
             detail="The issue must be assessed (Task 10) before a refund can be executed",
         )
-    if assessment.authority_decision != "allow":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The Authority Engine decision on this assessment is "
-                f"'{assessment.authority_decision}' — refund execution requires an explicit allow"
-            ),
-        )
-    if assessment.proposed_action != AllowedAction.REQUEST_REFUND.value:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The resolution assessment proposed '{assessment.proposed_action}', not "
-                "'request_refund' — refund execution is not authorized by the assessment"
-            ),
-        )
 
+    # The assessment's proposed_action is a recommendation, not a permission: the buyer may
+    # choose either remedy for an eligible issue. Authorization is the Authority Engine
+    # alone, re-run at execution time below — the single authorization source.
     # A return already accepted by a provider resolves the issue in kind, exactly like a
     # replacement (Task 12B extends the same mutual-exclusion rule).
     accepted_return = await _load_return(db, issue_id)
@@ -3745,25 +3778,10 @@ async def run_replacement_executor(
             status_code=400,
             detail="The issue must be assessed (Task 10) before a replacement can be executed",
         )
-    if assessment.authority_decision != "allow":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The Authority Engine decision on this assessment is "
-                f"'{assessment.authority_decision}' — replacement execution requires an "
-                "explicit allow"
-            ),
-        )
-    if assessment.proposed_action != AllowedAction.REQUEST_REPLACEMENT.value:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The resolution assessment proposed '{assessment.proposed_action}', not "
-                "'request_replacement' — replacement execution is not authorized by the "
-                "assessment"
-            ),
-        )
 
+    # The assessment's proposed_action is a recommendation, not a permission: the buyer may
+    # choose either remedy for an eligible issue. Authorization is the Authority Engine
+    # alone, re-run at execution time below — the single authorization source.
     # A return already accepted by a provider occupies this issue the same way a replacement
     # does, so the two fulfilment paths cannot both run (Task 12B).
     accepted_return = await _load_return(db, issue_id)
@@ -5215,6 +5233,22 @@ async def delegate_mission_authority(
                 ),
             )
 
+    # The UI delegates remedies without amounts (amounts are never client-supplied), but the
+    # engine requires an explicit refund ceiling before any refund (Task 11B). When the owner
+    # delegates request_refund and neither the request nor the mandate carries a ceiling, the
+    # server derives one from the verified TEST payment itself — clamped by this deployment's
+    # ceiling — so the remedy the buyer just allowed is actually exercisable.
+    refund_limit = (
+        payload.refund_limit if payload.refund_limit is not None else authority.refund_limit
+    )
+    if AllowedAction.REQUEST_REFUND in requested and refund_limit is None:
+        payment_data = (record.shopping_intent or {}).get("payment") or {}
+        if payment_data.get("status") == "verified" and payment_data.get("razorpay_payment_id"):
+            order = await _load_order(db, mission_id)
+            if order is not None:
+                amount, _, _ = _canonical_refund_amount(payment_data, order)
+                refund_limit = min(amount, settings.shopping_refund_max_inr)
+
     if payload.expires_at is not None and payload.expires_at <= datetime.utcnow():
         raise HTTPException(
             status_code=400, detail="An authority window has to end in the future."
@@ -5225,9 +5259,7 @@ async def delegate_mission_authority(
         update={
             "allowed_actions": granted,
             "recovery_budget": max(authority.recovery_budget, payload.recovery_budget),
-            "refund_limit": payload.refund_limit
-            if payload.refund_limit is not None
-            else authority.refund_limit,
+            "refund_limit": refund_limit,
             "expires_at": payload.expires_at or authority.expires_at,
         }
     )

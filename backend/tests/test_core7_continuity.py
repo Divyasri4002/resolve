@@ -1013,14 +1013,22 @@ async def test_two_issues_are_assessed_and_resolved_independently(
         assert len(await _rows(test_session, RefundRecord, mission_id)) == 1
         assert await _rows(test_session, ReplacementRecord, mission_id) == []
 
-        # The assessment froze B's escalated gap: delegating replacement afterwards does not
-        # resurrect it — the executor re-checks the assessment's own recorded decision
-        # ('escalate' is not 'allow') and refuses.
+        # M22 P5-A: the assessment's proposal is a recommendation, not a permission — the
+        # live Authority Engine re-run at execution time is the single authorization source.
+        # Delegating replacement afterwards means the buyer may now choose that remedy, so
+        # the executor runs and reports this deployment's honest limitation: no merchant
+        # replacement provider is connected, so the request stays pending, nothing is
+        # claimed, and the resolution mirrors the executor record as pending — NOT denied
+        # (a denial is an authority verdict, and the authority allowed this) and never a
+        # claimed completion.
         assert (await _delegate(client, mission_id, ["request_replacement"])).status_code == 200
-        still_denied = await _resolve(client, mission_id, b_id)
-        assert still_denied.status_code == 400
-        assert still_denied.json()["resolution_state"] == "denied"
-        assert await _rows(test_session, ReplacementRecord, mission_id) == []
+        b_unresolved = await _resolve(client, mission_id, b_id)
+        assert b_unresolved.status_code == 503
+        assert b_unresolved.json()["resolution_state"] == "pending"
+        replacements = await _rows(test_session, ReplacementRecord, mission_id)
+        assert len(replacements) == 1
+        assert replacements[0].status == "pending"
+        assert replacements[0].error_reason
         # No cross-issue leakage: one refund (A), one resolution record per issue.
         assert len(await _rows(test_session, RefundRecord, mission_id)) == 1
         resolution_rows = await _rows(test_session, ResolutionRecord, mission_id)

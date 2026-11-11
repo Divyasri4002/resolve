@@ -884,6 +884,15 @@ def test_the_pairing_channel_needed_no_schema_and_no_new_status():
         "shopify_product_gid",
         "shopify_variant_gid",
         "shopify_store_domain",
+        # M22 later committed the delivery/review facts (all nullable, additive); the pin stays exact.
+        "delivered_at",
+        "delivery_mode",
+        "shipping_address",
+        "shipping_address_confirmed_at",
+        "review_rating",
+        "review_body",
+        "review_created_at",
+        "review_updated_at",
     }
     values = {member.value for member in MissionStatus}
     assert not [value for value in values if "merchant" in value or "link" in value], values

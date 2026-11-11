@@ -102,6 +102,16 @@ def no_sleeping(monkeypatch):
     return waits
 
 
+@pytest.fixture(autouse=True)
+def closed_circuit():
+    """The failover cooldown is module state by design — it must outlive one request — so each
+    test here starts (and leaves) a closed breaker: an exhaustion scripted in one test must not
+    silently reroute another test's provider calls to its stand-by."""
+    provider_module._circuit_open_until.clear()
+    yield
+    provider_module._circuit_open_until.clear()
+
+
 class _ScriptedHttpx:
     """
     The provider's HTTP client, serving a fixed sequence of answers.
@@ -279,10 +289,12 @@ async def test_a_rate_limit_that_will_not_lift_is_bounded_and_names_the_attempts
     monkeypatch, budget, no_sleeping
 ):
     """
-    Three attempts, two waits, then a refusal — and never a fourth request.
+    Two attempts, one wait, then a refusal — and never a third request to a dead quota.
 
     An unbounded retry against a rate-limited service is a self-inflicted denial of service on your
-    own quota, and it is how a demo ends up half-verified.
+    own quota. One quiet retry survives the transient burst the deployment actually hits; a SECOND
+    429 means the quota window will not open within this call's budget, so the ladder stops here
+    and the stand-by provider — a different quota pool — takes the call instead.
     """
     scripted = _ScriptedHttpx(_refused(429))
     monkeypatch.setattr("httpx.AsyncClient", scripted)
@@ -290,11 +302,11 @@ async def test_a_rate_limit_that_will_not_lift_is_bounded_and_names_the_attempts
     with pytest.raises(ReasoningUnavailable) as raised:
         await _provider().choose_agent_action({"mission": {}}, declarations_for_model())
 
-    assert len(scripted.sent) == budget["retries"] + 1 == 3
-    assert len(no_sleeping) == 2
-    assert raised.value.attempts == 3
+    assert len(scripted.sent) == 2
+    assert len(no_sleeping) == 1
+    assert raised.value.attempts == 2
     assert raised.value.status_code == 429
-    assert "3 attempt" in str(raised.value)
+    assert "2 attempt" in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -467,6 +479,68 @@ async def test_a_defect_is_not_hidden_behind_the_stand_by():
     assert standby.calls == 0
 
 
+@pytest.mark.asyncio
+async def test_a_defect_does_not_put_the_primary_in_cooldown():
+    """
+    Failover answers 'the provider is down', never 'the code is wrong' — twice over.
+
+    A refusal on its merits must not merely fail over honestly; it must not reroute the NEXT
+    call either. The cooldown exists for quota windows and outages, and a defect is neither.
+    """
+    async def broken(context):
+        raise ValueError("malformed request built upstream")
+
+    primary = _StubProvider(broken)
+    standby = _StubProvider(lambda context: {"proposed_action": "request_refund"})
+    wrapper = FallbackReasoningProvider(primary, standby)
+
+    with pytest.raises(ValueError):
+        await wrapper.assess_resolution({})
+    with pytest.raises(ValueError):
+        await wrapper.assess_resolution({})
+
+    assert primary.calls == 2
+    assert standby.calls == 0
+    assert provider_module._circuit_open_until == {}
+
+
+@pytest.mark.asyncio
+async def test_after_one_exhaustion_the_next_call_skips_the_dead_primary():
+    """
+    The quota window that just refused every attempt will refuse the next call's attempts too.
+
+    The first call fails over to the stand-by and records a cooldown, so the SECOND model call of
+    the same turn reaches the stand-by on its first request instead of re-paying the primary's
+    dead ladder. An expired cooldown asks the primary again exactly as before — a recovery is
+    noticed within one cooldown, and a recovery that never comes costs nothing but log lines.
+    """
+    exhausted = {"now": True}
+
+    async def exhaust_then_answer(context):
+        if exhausted["now"]:
+            raise ReasoningUnavailable("Gemini", 429, attempts=2)
+        return {"proposed_action": "request_refund"}
+
+    primary = _StubProvider(exhaust_then_answer)
+
+    async def standing_by(context):
+        return {"proposed_action": "request_refund"}
+
+    standby = _StubProvider(standing_by)
+    wrapper = FallbackReasoningProvider(primary, standby)
+
+    assert await wrapper.assess_resolution({}) == {"proposed_action": "request_refund"}
+    assert await wrapper.assess_resolution({}) == {"proposed_action": "request_refund"}
+    assert primary.calls == 1, "the cooldown skipped the primary on the second call"
+    assert standby.calls == 2
+
+    provider_module._circuit_open_until.clear()  # the cooldown has expired
+    exhausted["now"] = False
+    assert await wrapper.assess_resolution({}) == {"proposed_action": "request_refund"}
+    assert primary.calls == 2, "an expired cooldown asks the primary again"
+    assert standby.calls == 2
+
+
 def test_the_gemini_provider_gets_a_groq_stand_by_only_when_a_credential_exists(monkeypatch):
     """
     The wiring contract: with REASONING_GROQ_API_KEY set, a Gemini deployment is wrapped and its
@@ -499,7 +573,10 @@ async def test_the_waits_grow_exponentially_and_never_leave_the_budget(monkeypat
     settings = get_settings()
     monkeypatch.setattr(settings, "reasoning_max_retries", 5, raising=False)
     monkeypatch.setattr(settings, "reasoning_retry_base_seconds", 0.5, raising=False)
-    scripted = _ScriptedHttpx(_refused(429))
+    # The full ladder is exercised on the 5xx family — a persistent 429 short-circuits it
+    # after two attempts (the stand-by is a different quota pool), so this property needs a
+    # "service had a moment" status that is worth waiting for.
+    scripted = _ScriptedHttpx(_refused(503))
     monkeypatch.setattr("httpx.AsyncClient", scripted)
 
     with pytest.raises(ReasoningUnavailable) as info:

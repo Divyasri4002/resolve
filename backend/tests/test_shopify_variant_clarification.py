@@ -1195,6 +1195,15 @@ def test_no_new_schema_columns_were_needed_or_added():
         "shopify_product_gid",
         "shopify_variant_gid",
         "shopify_store_domain",
+        # M22 later committed the delivery/review facts (all nullable, additive); the pin stays exact.
+        "delivered_at",
+        "delivery_mode",
+        "shipping_address",
+        "shipping_address_confirmed_at",
+        "review_rating",
+        "review_body",
+        "review_created_at",
+        "review_updated_at",
     }
     columns = {column.name for column in ResolveOrderRecord.__table__.columns}
     assert "variant_clarification" not in columns

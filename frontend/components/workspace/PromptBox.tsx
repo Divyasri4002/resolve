@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp } from "lucide-react";
 import { Spinner } from "@/components/ui/Spinner";
 
@@ -16,11 +16,26 @@ const MAX_TEXTAREA_HEIGHT_PX = 160;
 /**
  * Fixed-bottom composer. Enter sends, Shift+Enter adds a line, and the textarea grows
  * with its content up to a capped height (then scrolls internally) so the surrounding
- * layout never jumps.
+ * layout never jumps. While a turn is running, the measured elapsed seconds are shown —
+ * an honest clock, never a fabricated progress state.
  */
 export function PromptBox({ onSubmit, placeholder, disabled = false }: Props) {
   const [value, setValue] = useState("");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!disabled) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(
+      () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)),
+      1000
+    );
+    return () => clearInterval(timer);
+  }, [disabled]);
 
   const submit = () => {
     if (!value.trim() || disabled) return;
@@ -70,9 +85,13 @@ export function PromptBox({ onSubmit, placeholder, disabled = false }: Props) {
           {disabled ? <Spinner size={15} /> : <ArrowUp size={16} />}
         </button>
       </div>
-      <p className="mx-auto mt-2 max-w-3xl text-center text-[10px] text-text-charcoal/35">
-        Enter to send · Shift+Enter for a new line — RESOLVE executes only what the Authority
-        Engine approves.
+      <p
+        className="mx-auto mt-2 max-w-3xl text-center text-[10px] text-text-charcoal/35"
+        aria-live="polite"
+      >
+        {disabled
+          ? `Working… ${elapsedSeconds}s — a slow reply means the reasoning service is busy, not that RESOLVE is stuck.`
+          : "Enter to send · Shift+Enter for a new line — RESOLVE executes only what the Authority Engine approves."}
       </p>
     </div>
   );

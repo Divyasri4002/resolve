@@ -1004,6 +1004,15 @@ def test_the_paired_state_needed_no_schema_and_adds_no_status_value():
         "shopify_product_gid",
         "shopify_variant_gid",
         "shopify_store_domain",
+        # M22 later committed the delivery/review facts (all nullable, additive); the pin stays exact.
+        "delivered_at",
+        "delivery_mode",
+        "shipping_address",
+        "shipping_address_confirmed_at",
+        "review_rating",
+        "review_body",
+        "review_created_at",
+        "review_updated_at",
     }
     values = {member.value for member in MissionStatus}
     # The lifecycle this task needed is derived, so the stored vocabulary is untouched: no status

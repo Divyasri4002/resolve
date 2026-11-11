@@ -946,7 +946,15 @@ export default function WorkspacePage() {
         return true;
       } catch (err) {
         setIssueError(messageOf(err));
-        await finishStep(missionId, `${label} refused`, null);
+        // A 503 here is the orchestrator's honest "intent recorded, no provider has accepted
+        // it" — not a refusal. Calling it refused would misreport an authority verdict that
+        // never happened.
+        const pending = err instanceof ApiError && err.status === 503;
+        await finishStep(
+          missionId,
+          pending ? `${label} recorded as pending — no provider has accepted it` : `${label} refused`,
+          null
+        );
         return false;
       } finally {
         setIsIssueBusy(false);

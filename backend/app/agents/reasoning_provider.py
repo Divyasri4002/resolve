@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any
@@ -133,10 +134,26 @@ async def _post_for_json(
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             if status_code not in TRANSIENT_REASONING_STATUS:
+                # A non-retryable answer (400/401/403) is a request-shape or credential problem
+                # the operator must see: raise_for_status() discards the provider's own
+                # explanation, and the exception message carries only the URL and status. The
+                # response body never echoes the request's credentials.
+                logger.error(
+                    "reasoning provider %s answered non-retryable HTTP %d; provider said: %s",
+                    label,
+                    status_code,
+                    exc.response.text[:500],
+                )
                 raise
             last_status = status_code
             detail = f"answered HTTP {status_code}"
             retry_after = exc.response.headers.get("Retry-After")
+            if status_code == 429 and attempt >= 1:
+                # A second 429 inside one call means this credential's quota window will not
+                # open within the budget. Free-tier windows recover on their own schedule, and
+                # the stand-by provider is a different quota pool — stop burning the ladder
+                # here so the fallback can engage now instead of a minute from now.
+                raise ReasoningUnavailable(label, 429, attempt + 1) from exc
         except httpx.TransportError as exc:
             # A dropped connection or a call that never answers is the same "ask again in a moment"
             # a 429/5xx is. This path used to escape with no retry at all, and it is where the
@@ -158,6 +175,29 @@ async def _post_for_json(
         await _pause(waiting)
 
     raise ReasoningUnavailable(label, last_status, attempts)
+
+
+# --------------------------------------------------------------------------- #
+# The stand-by's cooldown (the failover circuit breaker)
+#
+# A rate-limit window does not lift inside one call's retry budget — and it does not lift between
+# two model calls seconds apart, either. Once the primary has exhausted its budget and the stand-by
+# has taken the call, immediately re-asking the primary on the NEXT call just re-pays the same dead
+# ladder (two refused requests plus the backoff between them) before failover engages again —
+# several seconds of every turn, spent on requests a quota has already refused. So the wrapper
+# keeps a short-lived record per primary/fallback pair: after one exhaustion the primary is skipped
+# outright for the cooldown and the stand-by answers from the very first request. When the cooldown
+# expires the primary is tried exactly as before, so a recovery is noticed within one cooldown, and
+# a recovery that never comes costs nothing but log lines. A defect — a request refused on its
+# merits — never opens the breaker: failover is for "down", never for "wrong".
+#
+# The record is module-level on purpose (one FallbackReasoningProvider is built per request, so
+# instance state would forget between the two model calls of a single turn) and credential-free
+# (the key is the two class names, never a key or a URL).
+# --------------------------------------------------------------------------- #
+
+_CIRCUIT_COOLDOWN_SECONDS = 90.0
+_circuit_open_until: dict[tuple[str, str], float] = {}
 
 
 
@@ -1531,22 +1571,42 @@ class FallbackReasoningProvider(ReasoningProvider):
     capability being asked for, the original exhaustion propagates rather than an AttributeError.
     The switch itself is visible only in the log line — never to the buyer, never with a
     credential in it.
+
+    After one primary exhaustion the primary is also skipped for a short cooldown
+    (`_CIRCUIT_COOLDOWN_SECONDS`): a quota window that just refused every attempt will refuse the
+    next call's attempts too, and the stand-by should answer from the first request instead of
+    arriving seconds into each one.
     """
 
     def __init__(self, primary: ReasoningProvider, fallback: ReasoningProvider) -> None:
         self.primary = primary
         self.fallback = fallback
+        self._pair = (type(primary).__name__, type(fallback).__name__)
 
     async def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        if _circuit_open_until.get(self._pair, 0.0) > time.monotonic():
+            fallback_method = getattr(self.fallback, method_name, None)
+            if fallback_method is not None:
+                logger.info(
+                    "reasoning primary is in its rate-limit cooldown; the stand-by provider "
+                    "answers from the first request"
+                )
+                return await fallback_method(*args, **kwargs)
+            # The cooldown skip is an optimization, never a new refusal: with no stand-by for
+            # this capability, the primary is asked exactly as before.
+            return await getattr(self.primary, method_name)(*args, **kwargs)
         try:
             return await getattr(self.primary, method_name)(*args, **kwargs)
         except ReasoningUnavailable as exc:
+            _circuit_open_until[self._pair] = time.monotonic() + _CIRCUIT_COOLDOWN_SECONDS
             fallback_method = getattr(self.fallback, method_name, None)
             if fallback_method is None:
                 raise
             logger.warning(
-                "reasoning primary unavailable (%s); placing the same call with the stand-by provider",
+                "reasoning primary unavailable (%s); placing the same call with the stand-by "
+                "provider and keeping the primary skipped for the next %.0fs",
                 exc,
+                _CIRCUIT_COOLDOWN_SECONDS,
             )
             return await fallback_method(*args, **kwargs)
 

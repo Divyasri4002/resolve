@@ -496,8 +496,8 @@ export function IssuePanel({
                 </p>
               )}
 
-              {issue.assessment?.authority_decision === "allow" &&
-                issue.assessment.proposed_action === "request_refund" &&
+              {issue.assessment &&
+                issue.remedy_authority?.request_refund?.decision === "allow" &&
                 issue.refund?.status !== "verified" && (
                   <button
                     onClick={() => onRefund(issue.issue_id)}
@@ -511,12 +511,15 @@ export function IssuePanel({
                     )}
                     {isProcessing
                       ? "Executing refund…"
-                      : "Execute TEST-mode refund (within delegated limit — amount is server-derived)"}
+                      : "Execute TEST-mode refund (within delegated limit — amount is server-derived)" +
+                        (issue.assessment.proposed_action === "request_refund"
+                          ? " — recommended"
+                          : "")}
                   </button>
                 )}
 
-              {issue.assessment?.authority_decision === "allow" &&
-                issue.assessment.proposed_action === "request_replacement" &&
+              {issue.assessment &&
+                issue.remedy_authority?.request_replacement?.decision === "allow" &&
                 issue.refund?.status !== "verified" &&
                 issue.replacement?.status !== "requested" &&
                 issue.replacement?.status !== "confirmed" && (
@@ -532,7 +535,10 @@ export function IssuePanel({
                     )}
                     {isProcessing
                       ? "Requesting replacement…"
-                      : "Execute replacement (product is server-resolved — no input needed)"}
+                      : "Execute replacement (product is server-resolved — no input needed)" +
+                        (issue.assessment.proposed_action === "request_replacement"
+                          ? " — recommended"
+                          : "")}
                   </button>
                 )}
 

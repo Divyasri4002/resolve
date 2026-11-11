@@ -420,7 +420,10 @@ def test_no_historical_order_row_is_migrated_or_rewritten():
     assert "amount" not in upgraded["resolve_orders"]
     for table, columns in _SCHEMA_UPGRADES.items():
         for name, ddl in columns:
-            assert "UPDATE" not in ddl.upper(), f"{table}.{name}"
+            # The DDL entries are additive column definitions; none may be an UPDATE
+            # statement. Column NAMES may legitimately contain "UPDATE" (review_updated_at),
+            # so match at statement position, not as a substring.
+            assert not ddl.upper().lstrip().startswith("UPDATE"), f"{table}.{name}"
 
     database_source = (APP_ROOT / "database.py").read_text(encoding="utf-8")
     assert not [

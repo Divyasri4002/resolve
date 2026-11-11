@@ -258,7 +258,10 @@ async def test_disabled_authority_denies_end_to_end(
         assert "not configured" in assessment["decision_reason"]
 
         resp = await _refund(client, mission_id, issue_id)
-        assert resp.status_code == 400 and "requires an explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and (
+            "The Authority Engine refused refund execution at execution time"
+            in resp.json()["detail"]
+        )
     assert fake.contexts, "the proposal was still generated — it was simply not authorized"
     assert refund_api.calls == {"create": 0, "fetch": 0, "list": 0}
 
@@ -405,7 +408,9 @@ async def test_client_body_cannot_change_authority(
                 "razorpay_payment_id": "pay_OTHER",
             },
         )
-        assert resp.status_code == 400 and "explicit allow" in resp.json()["detail"]
+        assert resp.status_code == 400 and (
+            "exceeds the delegated refund ceiling" in resp.json()["detail"]
+        )
     assert refund_api.calls == {"create": 0, "fetch": 0, "list": 0}
 
 
@@ -505,3 +510,52 @@ async def test_non_shopping_mission_foreign_user_and_duplicate_refund(
         assert second.json()["refund_id"] == first.json()["refund_id"]
         assert second.json()["already_existed"] is True
     assert refund_api.calls["create"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 15 (M22 P5-A): the UI's "Allow refund" sends no amount — the server derives
+# the ceiling from the verified payment, so the delegated remedy is exercisable
+# --------------------------------------------------------------------------- #
+async def test_ui_delegation_without_amount_derives_refund_ceiling_from_payment(
+    restart_env,
+    install_mock_discovery,
+    sample_products,
+    mock_razorpay,
+    refund_api,
+    fake_reasoning,
+    monkeypatch,
+):
+    _settings(monkeypatch, enabled=True, ceiling="500")
+    make_client, test_session = restart_env
+    async with make_client() as client:
+        mission_id = await _verified_mission_product(
+            client, install_mock_discovery, sample_products, mock_razorpay, "item_dove", "pay_B15"
+        )
+        issue_id = await _confirmed_order_with_issue(client, mission_id)
+
+        # Exactly what the workspace's Allow refund button sends: actions only, no amounts.
+        delegated = await client.post(
+            f"/missions/{mission_id}/authority/delegate",
+            json={"allowed_actions": ["request_refund"]},
+        )
+        assert delegated.status_code == 200, delegated.text
+
+        from app.models.db_models import MissionRecord
+
+        async with test_session() as session:
+            rec = await session.get(MissionRecord, mission_id)
+            assert rec.mandate["authority"]["refund_limit"] == "399.00"
+
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        ra = next(i for i in issues if i["issue_id"] == issue_id)["remedy_authority"]
+        assert ra["request_refund"]["decision"] == "allow", ra["request_refund"]
+
+        # The derived ceiling is real: the executor runs the refund to completion. The
+        # executor requires the issue assessed first (Task 10), exactly as the UI flow does.
+        fake_reasoning(_refund_proposal(399))
+        assessment = await _assess(client, mission_id, issue_id)
+        assert assessment["authority_decision"] == "allow"
+        resp = await _refund(client, mission_id, issue_id)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "verified"
+        assert refund_api.calls["create"] == 1
