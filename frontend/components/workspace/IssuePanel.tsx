@@ -2,8 +2,16 @@
 
 import { useState } from "react";
 import type { OrderIssue } from "@/lib/types";
+import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { formatMoney } from "@/lib/format";
+import {
+  AUTHORITY_DECISION_TONES,
+  EXECUTION_STATE_TONES,
+  ISSUE_STATUS_TONES,
+  RESOLUTION_STATE_TONES,
+  statusTone,
+} from "@/lib/statusTone";
 import {
   AlertCircle,
   CheckCircle2,
@@ -45,43 +53,14 @@ const ACTION_LABELS: Record<string, string> = {
   no_action: "No action",
 };
 
-const DECISION_STYLES: Record<string, string> = {
-  allow: "bg-emerald-100 text-emerald-800",
-  deny: "bg-primary-rose/10 text-primary-rose",
-  escalate: "bg-sky-100 text-sky-800",
-};
-
-const REPLACEMENT_STYLES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800",
-  requested: "bg-sky-100 text-sky-800",
-  confirmed: "bg-emerald-100 text-emerald-800",
-  failed: "bg-primary-rose/10 text-primary-rose",
-};
-
-const RETURN_STYLES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800",
-  requested: "bg-sky-100 text-sky-800",
-  confirmed: "bg-emerald-100 text-emerald-800",
-  failed: "bg-primary-rose/10 text-primary-rose",
-};
-
-const REFUND_STYLES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800",
-  verified: "bg-emerald-100 text-emerald-800",
-  failed: "bg-primary-rose/10 text-primary-rose",
-};
-
-const RESOLUTION_STYLES: Record<string, string> = {
-  denied: "bg-primary-rose/10 text-primary-rose",
-  pending: "bg-amber-100 text-amber-800",
-  requested: "bg-sky-100 text-sky-800",
-  verified: "bg-emerald-100 text-emerald-800",
-  confirmed: "bg-emerald-100 text-emerald-800",
-  failed: "bg-primary-rose/10 text-primary-rose",
-  escalated: "bg-sky-100 text-sky-800",
-  more_information_required: "bg-neutral-sand text-text-charcoal/70",
-  no_action: "bg-neutral-sand text-text-charcoal/70",
-};
+// Semantic action-button tones: blue = inspection/bookkeeping steps, green = provider
+// execution steps, terracotta = the orchestrating resolve step.
+const INFO_ACTION_CLASSES =
+  "inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60";
+const EXECUTE_ACTION_CLASSES =
+  "inline-flex items-center gap-2 rounded-lg border border-status-success/40 px-3 py-1.5 text-[11px] font-semibold text-status-success transition hover:bg-status-success hover:text-surface disabled:cursor-not-allowed disabled:opacity-60";
+const RESOLVE_ACTION_CLASSES =
+  "inline-flex items-center gap-2 rounded-lg border border-accent-terracotta/40 px-3 py-1.5 text-[11px] font-semibold text-accent-terracotta transition hover:bg-accent-terracotta hover:text-surface disabled:cursor-not-allowed disabled:opacity-60";
 
 // A resolution in one of these states is finished: /resolve returns the persisted outcome and
 // starts nothing new, so the frontend hides the button for them.
@@ -141,6 +120,114 @@ function actionLabel(value: string): string {
   return ACTION_LABELS[value] ?? value.replace(/_/g, " ");
 }
 
+/**
+ * M22 §2: the category's deterministic intake questions and the buyer's answers.
+ *
+ * While the issue is `reported` this is an editable form (re-submitting replaces the whole
+ * set); afterwards it degrades to a read-only record — the assessment already consumed the
+ * evidence, so it cannot be rewritten. Answers are the buyer's own words recorded as
+ * assessment context; they authorize nothing.
+ */
+function IssueAnswersForm({
+  issue,
+  isProcessing,
+  onSubmitAnswers,
+}: {
+  issue: OrderIssue;
+  isProcessing: boolean;
+  onSubmitAnswers: (issueId: string, answers: Record<string, string>) => Promise<boolean>;
+}) {
+  const questions = issue.questions ?? [];
+  const [draft, setDraft] = useState<Record<string, string>>(issue.answers ?? {});
+
+  if (questions.length === 0) return null;
+
+  if (issue.status !== "reported") {
+    const recorded = Object.keys(issue.answers ?? {});
+    if (recorded.length === 0) return null;
+    return (
+      <div className="mt-3 rounded-lg border border-text-charcoal/10 bg-surface p-3 text-[11px]">
+        <p className="font-semibold uppercase tracking-wider text-text-charcoal/50">
+          Your answers
+        </p>
+        <dl className="mt-1.5 space-y-1.5">
+          {questions.map((q) => {
+            const answer = issue.answers?.[q.question_id];
+            return answer ? (
+              <div key={q.question_id}>
+                <dt className="text-text-charcoal/55">{q.prompt}</dt>
+                <dd className="text-text-charcoal/80">{answer}</dd>
+              </div>
+            ) : null;
+          })}
+        </dl>
+        <p className="mt-1.5 text-text-charcoal/45">
+          Recorded as context for the assessment — authorizes nothing.
+        </p>
+      </div>
+    );
+  }
+
+  const answeredCount = questions.filter(
+    (q) => (draft[q.question_id] ?? "").trim().length > 0
+  ).length;
+  const canSubmit = !isProcessing && answeredCount > 0;
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!canSubmit) return;
+        const answers: Record<string, string> = {};
+        for (const q of questions) {
+          const value = (draft[q.question_id] ?? "").trim();
+          if (value) answers[q.question_id] = value;
+        }
+        void onSubmitAnswers(issue.issue_id, answers);
+      }}
+      className="mt-3 rounded-lg border border-text-charcoal/10 bg-surface p-3 text-[11px]"
+    >
+      <p className="font-semibold uppercase tracking-wider text-text-charcoal/50">
+        Intake questions
+      </p>
+      <p className="mt-1 text-text-charcoal/55">
+        Answering helps the assessment reason over your specifics. Answers are your own words,
+        recorded as context — they authorize nothing. Re-submitting replaces all previous answers.
+      </p>
+      <div className="mt-2 space-y-2.5">
+        {questions.map((q) => (
+          <label key={q.question_id} className="block">
+            <span className="text-text-charcoal/70">{q.prompt}</span>
+            <textarea
+              value={draft[q.question_id] ?? ""}
+              onChange={(e) =>
+                setDraft((prev) => ({ ...prev, [q.question_id]: e.target.value }))
+              }
+              rows={2}
+              maxLength={500}
+              className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
+            />
+          </label>
+        ))}
+      </div>
+      <div className="mt-2 flex items-center justify-end">
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isProcessing ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ClipboardList size={12} />
+          )}
+          {isProcessing ? "Recording answers…" : "Record answers"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 interface IssuePanelProps {
   issues: OrderIssue[];
   isProcessing?: boolean;
@@ -148,6 +235,8 @@ interface IssuePanelProps {
   /** M22: remedies already delegated on this mission — drives the reassess affordance. */
   delegatedActions?: string[];
   onReport: (issueType: string, description: string, requestedResolution: string) => Promise<boolean>;
+  /** M22 §2: store the buyer's answers to the category's intake questions on the issue. */
+  onSubmitAnswers: (issueId: string, answers: Record<string, string>) => Promise<boolean>;
   onAssess: (issueId: string) => Promise<boolean>;
   /** M22: re-run the assessment after a delegation — an authority gap is recoverable. */
   onReassess?: (issueId: string) => Promise<boolean>;
@@ -166,6 +255,7 @@ export function IssuePanel({
   error = null,
   delegatedActions = [],
   onReport,
+  onSubmitAnswers,
   onAssess,
   onReassess,
   onRefund,
@@ -241,10 +331,10 @@ export function IssuePanel({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="inline-flex items-center gap-2 font-semibold text-text-charcoal">
                   {issueTypeLabel(issue.issue_type)}
-                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-800">
+                  <Badge tone={statusTone(ISSUE_STATUS_TONES, issue.status)}>
                     <CheckCircle2 size={10} className="shrink-0" />
                     {STATUS_LABELS[issue.status] ?? issue.status}
-                  </span>
+                  </Badge>
                 </span>
                 {issue.created_at && (
                   <span className="text-text-charcoal/50">
@@ -264,20 +354,26 @@ export function IssuePanel({
                 <span className="font-mono">{issue.issue_id}</span>
               </div>
 
+              <IssueAnswersForm
+                issue={issue}
+                isProcessing={isProcessing}
+                onSubmitAnswers={onSubmitAnswers}
+              />
+
               {issue.assessment ? (
                 <div className="mt-3 rounded-lg border border-text-charcoal/10 bg-surface p-3 text-[11px]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-semibold uppercase tracking-wider text-text-charcoal/50">
                       Resolution assessment
                     </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                        DECISION_STYLES[issue.assessment.authority_decision] ??
-                        "bg-neutral-sand text-text-charcoal/70"
-                      }`}
+                    <Badge
+                      tone={statusTone(
+                        AUTHORITY_DECISION_TONES,
+                        issue.assessment.authority_decision
+                      )}
                     >
                       Authority decision: {issue.assessment.authority_decision}
-                    </span>
+                    </Badge>
                   </div>
                   <p className="mt-1.5 text-text-charcoal/80">
                     Proposed resolution:{" "}
@@ -296,7 +392,7 @@ export function IssuePanel({
                     )}
                     {issue.assessment.proposal_source === "safe_fallback" && (
                       <span className="ml-1 text-text-charcoal/45">
-                        (deterministic fallback — the model's response could not be used)
+                        (deterministic fallback — the model&apos;s response could not be used)
                       </span>
                     )}
                   </p>
@@ -305,11 +401,11 @@ export function IssuePanel({
                   <p className="mt-1 text-text-charcoal/55">
                     Decision reason: {issue.assessment.decision_reason}
                   </p>
-                  <p className="mt-2 flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 font-semibold text-amber-800">
+                  <p className="mt-2 flex items-center gap-1.5 rounded-md bg-status-pending-soft px-2 py-1.5 font-semibold text-status-pending">
                     <AlertCircle size={12} className="shrink-0" />
                     {assessmentWarning(issue.assessment)}
                   </p>
-                        <p className="mt-1 font-mono text-[10px] text-text-charcoal/40">
+                  <p className="mt-1 font-mono text-[10px] text-text-charcoal/40">
                     {issue.assessment.assessment_id}
                   </p>
                 </div>
@@ -318,7 +414,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onAssess(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-sky-500/40 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-500 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -336,7 +432,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onResolve(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-violet-500/40 px-3 py-1.5 text-[11px] font-semibold text-violet-700 transition hover:bg-violet-500 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-accent-terracotta/40 px-3 py-1.5 text-[11px] font-semibold text-accent-terracotta transition hover:bg-accent-terracotta hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -360,7 +456,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onReassess(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-sky-500/40 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-500 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -377,7 +473,7 @@ export function IssuePanel({
                 <button
                   onClick={() => onManualReview(issue.issue_id)}
                   disabled={isProcessing}
-                  className="mt-2.5 ml-2 inline-flex items-center gap-2 rounded-lg border border-sky-500/40 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-500 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                  className="mt-2.5 ml-2 inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isProcessing ? (
                     <Loader2 size={12} className="animate-spin" />
@@ -389,7 +485,7 @@ export function IssuePanel({
               )}
 
               {issue.manual_review?.requested && (
-                <p className="mt-2 flex items-start gap-1.5 rounded-md bg-sky-50 px-2 py-1.5 text-[11px] font-semibold text-sky-800">
+                <p className="mt-2 flex items-start gap-1.5 rounded-md bg-status-info-soft px-2 py-1.5 text-[11px] font-semibold text-status-info">
                   <AlertCircle size={12} className="mt-0.5 shrink-0" />
                   Manual review requested
                   {issue.manual_review.requested_at
@@ -406,7 +502,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onRefund(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-emerald-600/40 px-3 py-1.5 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-600 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-status-success/40 px-3 py-1.5 text-[11px] font-semibold text-status-success transition hover:bg-status-success hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -427,7 +523,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onReplace(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-emerald-600/40 px-3 py-1.5 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-600 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-status-success/40 px-3 py-1.5 text-[11px] font-semibold text-status-success transition hover:bg-status-success hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -446,13 +542,9 @@ export function IssuePanel({
                     <span className="font-semibold uppercase tracking-wider text-text-charcoal/50">
                       Refund execution
                     </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                        REFUND_STYLES[issue.refund.status] ?? "bg-neutral-sand text-text-charcoal/70"
-                      }`}
-                    >
+                    <Badge tone={statusTone(EXECUTION_STATE_TONES, issue.refund.status)}>
                       {issue.refund.status}
-                    </span>
+                    </Badge>
                   </div>
                   <p className="mt-1.5 text-text-charcoal/80">
                     Amount:{" "}
@@ -478,13 +570,13 @@ export function IssuePanel({
                     </p>
                   )}
                   {issue.refund.error_reason && (
-                    <p className="mt-1 text-primary-rose/80">Reason: {issue.refund.error_reason}</p>
+                    <p className="mt-1 text-status-failure">Reason: {issue.refund.error_reason}</p>
                   )}
                   <p
                     className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 font-semibold ${
                       issue.refund.status === "verified"
-                        ? "bg-emerald-50 text-emerald-800"
-                        : "bg-amber-50 text-amber-800"
+                        ? "bg-status-success-soft text-status-success"
+                        : "bg-status-pending-soft text-status-pending"
                     }`}
                   >
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
@@ -507,7 +599,7 @@ export function IssuePanel({
                   <button
                     onClick={() => onReturn(issue.issue_id)}
                     disabled={isProcessing}
-                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-emerald-600/40 px-3 py-1.5 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-600 hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-status-success/40 px-3 py-1.5 text-[11px] font-semibold text-status-success transition hover:bg-status-success hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <Loader2 size={12} className="animate-spin" />
@@ -526,14 +618,9 @@ export function IssuePanel({
                     <span className="font-semibold uppercase tracking-wider text-text-charcoal/50">
                       Replacement execution
                     </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                        REPLACEMENT_STYLES[issue.replacement.status] ??
-                        "bg-neutral-sand text-text-charcoal/70"
-                      }`}
-                    >
+                    <Badge tone={statusTone(EXECUTION_STATE_TONES, issue.replacement.status)}>
                       {issue.replacement.status}
-                    </span>
+                    </Badge>
                   </div>
                   <p className="mt-1.5 text-text-charcoal/80">
                     Replacing:{" "}
@@ -567,7 +654,7 @@ export function IssuePanel({
                     </p>
                   )}
                   {issue.replacement.error_reason && (
-                    <p className="mt-1 text-primary-rose/80">
+                    <p className="mt-1 text-status-failure">
                       Reason: {issue.replacement.error_reason}
                     </p>
                   )}
@@ -575,10 +662,10 @@ export function IssuePanel({
                     className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 font-semibold ${
                       issue.replacement.provider === "none" &&
                       issue.replacement.status === "pending"
-                        ? "bg-sky-50 text-sky-800"
+                        ? "bg-status-info-soft text-status-info"
                         : issue.replacement.status === "confirmed"
-                          ? "bg-emerald-50 text-emerald-800"
-                          : "bg-amber-50 text-amber-800"
+                          ? "bg-status-success-soft text-status-success"
+                          : "bg-status-pending-soft text-status-pending"
                     }`}
                   >
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
@@ -601,14 +688,9 @@ export function IssuePanel({
                     <span className="font-semibold uppercase tracking-wider text-text-charcoal/50">
                       Return execution
                     </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                        RETURN_STYLES[issue.return.status] ??
-                        "bg-neutral-sand text-text-charcoal/70"
-                      }`}
-                    >
+                    <Badge tone={statusTone(EXECUTION_STATE_TONES, issue.return.status)}>
                       {issue.return.status}
-                    </span>
+                    </Badge>
                   </div>
                   <p className="mt-1.5 text-text-charcoal/80">
                     Returning:{" "}
@@ -642,17 +724,17 @@ export function IssuePanel({
                     </p>
                   )}
                   {issue.return.failure_reason && (
-                    <p className="mt-1 text-primary-rose/80">
+                    <p className="mt-1 text-status-failure">
                       Reason: {issue.return.failure_reason}
                     </p>
                   )}
                   <p
                     className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 font-semibold ${
                       issue.return.provider === "none" && issue.return.status === "pending"
-                        ? "bg-sky-50 text-sky-800"
+                        ? "bg-status-info-soft text-status-info"
                         : issue.return.status === "confirmed"
-                          ? "bg-emerald-50 text-emerald-800"
-                          : "bg-amber-50 text-amber-800"
+                          ? "bg-status-success-soft text-status-success"
+                          : "bg-status-pending-soft text-status-pending"
                     }`}
                   >
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
@@ -669,19 +751,19 @@ export function IssuePanel({
               )}
 
               {issue.resolution && (
-                <div className="mt-3 rounded-lg border border-violet-500/20 bg-surface p-3 text-[11px]">
+                <div className="mt-3 rounded-lg border border-text-charcoal/10 bg-surface p-3 text-[11px]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-semibold uppercase tracking-wider text-text-charcoal/50">
                       Autonomous resolution
                     </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                        RESOLUTION_STYLES[issue.resolution.resolution_state] ??
-                        "bg-neutral-sand text-text-charcoal/70"
-                      }`}
+                    <Badge
+                      tone={statusTone(
+                        RESOLUTION_STATE_TONES,
+                        issue.resolution.resolution_state
+                      )}
                     >
                       {issue.resolution.resolution_state.replace(/_/g, " ")}
-                    </span>
+                    </Badge>
                   </div>
                   <p className="mt-1.5 text-text-charcoal/80">
                     Action:{" "}
@@ -704,7 +786,7 @@ export function IssuePanel({
                       )}
                     </p>
                   )}
-                  <p className="mt-2 flex items-start gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 font-semibold text-amber-800">
+                  <p className="mt-2 flex items-start gap-1.5 rounded-md bg-status-pending-soft px-2 py-1.5 font-semibold text-status-pending">
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
                     {issue.resolution.resolution_note ??
                       "Being allowed is not being done — the summary follows the executor and the provider, never the request."}

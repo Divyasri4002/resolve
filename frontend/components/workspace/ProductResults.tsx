@@ -100,7 +100,7 @@ export function ProductResults({
               key={p.product_url ?? p.product_id ?? `${p.title}-${i}`}
               className={`group flex items-start gap-3 rounded-xl border bg-neutral-sand/10 p-3 transition ${
                 isSelected
-                  ? "border-emerald-500/60 bg-emerald-50/40"
+                  ? "border-status-success/60 bg-status-success-soft/50"
                   : "border-text-charcoal/10 hover:border-accent-terracotta/40 hover:bg-neutral-sand/20"
               }`}
             >
@@ -181,7 +181,7 @@ export function ProductResults({
                   <p
                     className={`mt-0.5 text-[10px] font-medium ${
                       p.source === "shopify"
-                        ? "text-emerald-700"
+                        ? "text-status-success"
                         : "text-text-charcoal/55"
                     }`}
                   >
@@ -269,7 +269,7 @@ export function ProductResults({
                 ) : (
                   selectable &&
                   (isSelected ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-semibold text-emerald-700">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-status-success-soft px-2.5 py-1 text-[10px] font-semibold text-status-success">
                       <CheckCircle2 size={11} className="shrink-0" />
                       Selected
                     </span>
@@ -296,7 +296,7 @@ export function ProductResults({
       </div>
 
       {error && (
-        <div className="mt-2.5 flex items-center gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-2.5 text-[11px] font-medium text-primary-rose">
+        <div className="mt-2.5 flex items-center gap-2 rounded-xl border border-status-failure/20 bg-status-failure-soft p-2.5 text-[11px] font-medium text-status-failure">
           <AlertCircle size={13} className="shrink-0" />
           {error}
         </div>

@@ -49,6 +49,15 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
         # past confirmation has neither, which is the truth for it.
         ("delivered_at", "delivered_at TIMESTAMP"),
         ("delivery_mode", "delivery_mode VARCHAR(32)"),
+        # M22 §4: the delivery destination the customer confirmed, and M22 §1/§7: the one
+        # review of the delivered order. All nullable — absent means "not yet given", which
+        # is the truth for it.
+        ("shipping_address", "shipping_address JSON"),
+        ("shipping_address_confirmed_at", "shipping_address_confirmed_at TIMESTAMP"),
+        ("review_rating", "review_rating INTEGER"),
+        ("review_body", "review_body TEXT"),
+        ("review_created_at", "review_created_at TIMESTAMP"),
+        ("review_updated_at", "review_updated_at TIMESTAMP"),
     ),
     "returns": (
         ("provider_order_reference", "provider_order_reference VARCHAR(128)"),
@@ -62,6 +71,9 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
     # every existing row simply has no pending question — which is the truth for it.
     "order_issues": (
         ("more_information_question", "more_information_question TEXT"),
+        # M22 §2: the buyer's answers to the deterministic per-category intake questions.
+        # Nullable — an issue may be assessed without any answers, which is the truth for it.
+        ("answers", "answers JSON"),
     ),
     # Phase 4.4: the submission lease. Every row that predates the lease has no submission
     # in flight, so 'idle' is the honest backfill; submission_owner is nullable because an

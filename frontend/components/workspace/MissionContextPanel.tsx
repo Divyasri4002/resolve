@@ -328,7 +328,7 @@ export function MissionContextPanel({
               <button
                 onClick={onRevoke}
                 disabled={isDelegating}
-                className="rounded-lg border border-primary-rose/30 px-2.5 py-1 text-[11px] font-medium text-primary-rose transition hover:bg-primary-rose/10 disabled:opacity-50"
+                className="rounded-lg border border-status-failure/30 px-2.5 py-1 text-[11px] font-medium text-status-failure transition hover:bg-status-failure/10 disabled:opacity-50"
               >
                 Withdraw all
               </button>
@@ -341,7 +341,7 @@ export function MissionContextPanel({
             </p>
           )}
           {delegationError && (
-            <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-primary-rose/10 p-2 text-[11px] text-primary-rose">
+            <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-status-failure-soft p-2 text-[11px] text-status-failure">
               <AlertCircle size={12} className="mt-0.5 shrink-0" />
               {delegationError}
             </p>

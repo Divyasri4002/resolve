@@ -70,11 +70,11 @@ export function CheckoutReview({
       </div>
 
       {confirmed && (
-        <div className="mt-4 flex items-start gap-2.5 rounded-xl bg-emerald-500/10 p-3.5 text-xs text-emerald-900 border border-emerald-500/25">
-          <CheckCircle2 size={16} className="shrink-0 text-emerald-700 mt-0.5" />
+        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-status-success/25 bg-status-success-soft p-3.5 text-xs text-status-success">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-status-success" />
           <div>
-            <p className="font-semibold text-emerald-800">Checkout confirmed. Ready for payment.</p>
-            <p className="mt-0.5 text-emerald-700">
+            <p className="font-semibold text-status-success">Checkout confirmed. Ready for payment.</p>
+            <p className="mt-0.5 text-status-success/90">
               You explicitly confirmed these details
               {confirmedAt
                 ? ` on ${new Date(confirmedAt).toLocaleString()}`
@@ -166,7 +166,7 @@ export function CheckoutReview({
       </div>
 
       {error && (
-        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3 text-xs font-medium text-primary-rose">
+        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-status-failure/20 bg-status-failure-soft p-3 text-xs font-medium text-status-failure">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           {error}
         </div>
@@ -183,7 +183,7 @@ export function CheckoutReview({
         </button>
 
         {confirmed ? (
-          <span className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-100 px-4 py-2.5 text-xs font-semibold text-emerald-700">
+          <span className="inline-flex items-center gap-1.5 rounded-xl bg-status-success-soft px-4 py-2.5 text-xs font-semibold text-status-success">
             <CheckCircle2 size={13} />
             Confirmed
           </span>

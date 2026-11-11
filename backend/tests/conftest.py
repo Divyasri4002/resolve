@@ -20,6 +20,10 @@ Every test here runs against mocks ONLY — no live LLM calls, no live SerpApi c
   purchase switch (production default OFF). MERCHANT_TRIGGER_URL/TOKEN stay empty here: tests
   that exercise the submission install an httpx.MockTransport through the purchase_trigger
   seam, so no test ever opens a network connection to a trigger process.
+- SHOPPING_DEMO_DELIVERY_ENABLED=false -> the demo-environment delivery transition (M22 §1)
+  stays OFF for the whole suite. The dev/demo .env ships it ON for the live demo, and pydantic
+  would otherwise let that leak into every test run; tests that prove the delivery (the M22 P3
+  battery) flip it explicitly per test via the settings object.
 
 Environment variables take priority over backend/.env in pydantic-settings, and this
 module is imported by pytest BEFORE any ``app.*`` import, so the cached Settings()
@@ -38,6 +42,7 @@ os.environ["REPLACEMENT_PROVIDER"] = "none"
 os.environ["SHOPPING_RETURN_AUTHORITY_ENABLED"] = "true"
 os.environ["RETURN_PROVIDER"] = "none"
 os.environ["SHOPPING_PURCHASE_AUTHORITY_ENABLED"] = "true"
+os.environ["SHOPPING_DEMO_DELIVERY_ENABLED"] = "false"
 
 import pytest
 from decimal import Decimal

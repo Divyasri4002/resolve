@@ -110,6 +110,7 @@ from app.payments.razorpay_client import (
     list_refunds_for_payment,
     verify_payment_signature,
 )
+from app.resolution.issue_questions import normalize_answers, questions_payload
 from app.resolution.orchestrator import (
     load_resolution as _load_resolution_row,
     resolution_response as _resolution_response,
@@ -2344,6 +2345,8 @@ def _issue_response(
         "requested_resolution": issue.requested_resolution,
         "status": issue.status,
         "evidence": issue.evidence or [],
+        "questions": questions_payload(issue.issue_type),
+        "answers": dict(issue.answers or {}),
         "created_at": issue.created_at.isoformat() if issue.created_at else None,
         "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
         "already_existed": already_existed,
@@ -2538,6 +2541,94 @@ async def report_order_issue(
 
 
 # --------------------------------------------------------------------------- #
+# M22 §2 — per-category issue questions and the buyer's answers.
+#
+# A reported issue carries only the buyer's free-text description. These surfaces
+# expose the deterministic question set for the issue's category (a pure constant,
+# never model- or client-authored) and persist the buyer's answers as issue context.
+# Answers authorize nothing and change nothing — they are what a later assessment
+# reads alongside the backend's own DB facts.
+# --------------------------------------------------------------------------- #
+
+
+class SubmitIssueAnswersRequest(BaseModel):
+    """The buyer's answers to the category's deterministic intake questions."""
+
+    answers: dict[str, str]
+
+
+def _issue_questions_response(issue: OrderIssueRecord) -> dict:
+    """The category's question set plus whatever the buyer has answered so far."""
+    return {
+        "issue_id": issue.issue_id,
+        "issue_type": issue.issue_type,
+        "questions": questions_payload(issue.issue_type),
+        "answers": dict(issue.answers or {}),
+    }
+
+
+@router.get("/{mission_id}/order/issues/{issue_id}/questions", response_model=dict)
+async def get_issue_questions(
+    mission_id: str,
+    issue_id: str,
+    current_user: UserRecord | None = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """The deterministic per-category question set for an issue, with any answers already
+    recorded. Owner-scoped like every issue surface; the client supplies nothing."""
+    await _load_mission_for_shopping_action(mission_id, current_user, db)
+    issue = await _load_issue(db, mission_id, issue_id)
+    return _issue_questions_response(issue)
+
+
+@router.post("/{mission_id}/order/issues/{issue_id}/answers", response_model=dict)
+async def submit_issue_answers(
+    mission_id: str,
+    issue_id: str,
+    body: SubmitIssueAnswersRequest,
+    current_user: UserRecord | None = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Store the buyer's answers to the category's intake questions on the issue row.
+
+    Validation is deterministic (`normalize_answers`): only this category's question ids,
+    non-empty bounded text — a rejected map replaces nothing. Answers are accepted only
+    while the issue is still `reported`: once an assessment has consumed the record, the
+    evidence it saw cannot be rewritten afterwards. Nothing else changes — no status
+    transition, no authority, no execution of anything.
+    """
+    await _load_mission_for_shopping_action(mission_id, current_user, db)
+    issue = await _load_issue(db, mission_id, issue_id)
+    if issue.status != IssueStatus.REPORTED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Answers can only be recorded while the issue is 'reported' "
+                f"(this one is '{issue.status}')"
+            ),
+        )
+    normalized, error = normalize_answers(issue.issue_type, body.answers)
+    if error is not None:
+        raise HTTPException(status_code=400, detail=error)
+
+    issue.answers = normalized
+    await audit.append_event(
+        db,
+        mission_id=mission_id,
+        actor="user",
+        action="issue_answers_recorded",
+        recorded=True,
+        reason=(
+            f"buyer answered {len(normalized)} of the {issue.issue_type} intake questions "
+            f"on issue {issue.issue_id}; recorded as assessment context, authorizes nothing"
+        ),
+    )
+    await db.commit()
+    return _issue_questions_response(issue)
+
+
+# --------------------------------------------------------------------------- #
 # Task 10 — resolution assessment & authority proposal.
 #
 # USER ISSUE -> REASONING MODEL -> STRUCTURED PROPOSAL -> AUTHORITY ENGINE -> DECISION.
@@ -2623,6 +2714,8 @@ def _build_resolution_context(
             "requested_resolution": issue.requested_resolution,
             "status": issue.status,
             "evidence": issue.evidence or [],
+            "category_questions": questions_payload(issue.issue_type),
+            "answers": dict(issue.answers or {}),
         },
         "authority_summary": {
             "allowed_actions": authority_data.get("allowed_actions", []),

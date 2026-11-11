@@ -61,7 +61,7 @@ export function OrderPanel({
             <p className="font-display text-base text-text-charcoal">Order lifecycle record</p>
           </div>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-800">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-status-info-soft px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-status-info">
           <ShieldCheck size={11} className="shrink-0" />
           Razorpay TEST MODE
         </span>
@@ -77,36 +77,24 @@ export function OrderPanel({
           {/* Lifecycle state */}
           <div
             className={`mt-3.5 flex items-start gap-2.5 rounded-xl border p-3.5 text-xs ${
-              delivered
-                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
+              delivered || confirmed
+                ? "border-status-success/25 bg-status-success-soft text-status-success"
                 : postPurchase
-                  ? "border-sky-500/25 bg-sky-500/10 text-sky-900"
-                  : confirmed
-                    ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-900"
-                    : "border-amber-500/25 bg-amber-500/10 text-amber-900"
+                  ? "border-status-info/25 bg-status-info-soft text-status-info"
+                  : "border-status-pending/25 bg-status-pending-soft text-status-pending"
             }`}
           >
             {delivered ? (
-              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-700" />
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
             ) : postPurchase ? (
-              <ClipboardCheck size={16} className="mt-0.5 shrink-0 text-sky-700" />
+              <ClipboardCheck size={16} className="mt-0.5 shrink-0" />
             ) : confirmed ? (
-              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-700" />
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
             ) : (
-              <FileText size={16} className="mt-0.5 shrink-0 text-amber-700" />
+              <FileText size={16} className="mt-0.5 shrink-0" />
             )}
             <div>
-              <p
-                className={`font-semibold ${
-                  delivered
-                    ? "text-emerald-800"
-                    : postPurchase
-                      ? "text-sky-800"
-                      : confirmed
-                        ? "text-emerald-800"
-                        : "text-amber-800"
-                }`}
-              >
+              <p className="font-semibold">
                 {delivered
                   ? "Delivered (demo simulated)"
                   : postPurchase
@@ -115,17 +103,7 @@ export function OrderPanel({
                       ? "Order confirmed"
                       : "Order created"}
               </p>
-              <p
-                className={`mt-0.5 ${
-                  delivered
-                    ? "text-emerald-700"
-                    : postPurchase
-                      ? "text-sky-700"
-                      : confirmed
-                        ? "text-emerald-700"
-                        : "text-amber-700"
-                }`}
-              >
+              <p className="mt-0.5 opacity-90">
                 {delivered
                   ? "RESOLVE persisted this delivery in the demo environment on your reload. It is simulated — not a carrier or merchant confirmation — and you can report a post-purchase issue below."
                   : postPurchase
@@ -207,11 +185,11 @@ export function OrderPanel({
         </>
       ) : (
         canCreate && (
-          <div className="mt-3.5 flex items-start gap-2.5 rounded-xl border border-blue-500/25 bg-blue-500/10 p-3.5 text-xs text-blue-900">
-            <FileText size={16} className="mt-0.5 shrink-0 text-blue-700" />
+          <div className="mt-3.5 flex items-start gap-2.5 rounded-xl border border-status-info/25 bg-status-info-soft p-3.5 text-xs text-status-info">
+            <FileText size={16} className="mt-0.5 shrink-0" />
             <div>
-              <p className="font-semibold text-blue-800">Payment verified — create the order record</p>
-              <p className="mt-0.5 text-blue-700">
+              <p className="font-semibold">Payment verified — create the order record</p>
+              <p className="mt-0.5 opacity-90">
                 The next step records RESOLVE&apos;s persistent order context for this verified test
                 payment. It is created server-side from the persisted checkout state.
               </p>
@@ -221,7 +199,7 @@ export function OrderPanel({
       )}
 
       {error && (
-        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3 text-xs font-medium text-primary-rose">
+        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-status-failure/20 bg-status-failure-soft p-3 text-xs font-medium text-status-failure">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           {error}
         </div>
@@ -272,7 +250,7 @@ export function OrderPanel({
           </button>
         )}
         {(confirmed || delivered) && (
-          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-status-success">
             <CheckCircle2 size={13} />
             {delivered ? "Demo journey complete" : "Lifecycle complete"}
           </span>

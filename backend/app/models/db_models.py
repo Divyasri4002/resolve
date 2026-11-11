@@ -160,6 +160,22 @@ class ResolveOrderRecord(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # M22 §4 — the delivery destination the CUSTOMER confirmed on this order. Stored server-side
+    # from the customer's own submission; a replacement request needs one before any provider is
+    # contacted, because a shipment without a confirmed destination cannot be honestly requested.
+    # Nullable: an order nobody has asked to fulfil has no address, which is the truth for it.
+    shipping_address: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    shipping_address_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # M22 §1/§7 — the customer's review of the delivered order, stored on the order row: one
+    # review per order, submitted only after delivery, edited only by its author (the owner).
+    # The customer's own voice on the record — never a decision, an authorization, or a fact
+    # the assessment consumes.
+    review_rating: Mapped[int | None] = mapped_column(nullable=True)
+    review_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     __table_args__ = (
         Index(
             "uq_resolve_orders_provider_order_reference",
@@ -203,6 +219,12 @@ class OrderIssueRecord(Base):
     requested_resolution: Mapped[str] = mapped_column(String(32), default="none")
     status: Mapped[str] = mapped_column(String(32), default="reported", index=True)
     evidence: Mapped[list] = mapped_column(JSON, default=list)
+
+    # M22 §2 — the buyer's answers to the deterministic per-category intake questions
+    # (app/resolution/issue_questions.py). The buyer's own words, stored as context for
+    # the assessment; never a decision, an authorization, or an order fact. Nullable:
+    # an issue may be assessed without any answers.
+    answers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Task 14B.5A — automated-decision opt-out. A customer who does not want an automated
     # resolution decision can request manual review; while active the orchestrator refuses to

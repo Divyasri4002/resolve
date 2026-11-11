@@ -324,6 +324,9 @@ export interface OrderIssue {
     | "replacement_requested"
   | "return_requested";
   evidence?: { kind?: string; url?: string | null; description?: string | null }[];
+  /** M22 §2: the deterministic per-category intake questions, with the buyer's recorded answers. */
+  questions?: { question_id: string; prompt: string }[];
+  answers?: Record<string, string>;
   created_at?: string | null;
   updated_at?: string | null;
   already_existed?: boolean;

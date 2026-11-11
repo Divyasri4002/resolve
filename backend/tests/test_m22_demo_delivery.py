@@ -10,6 +10,8 @@ afterwards.
 """
 from __future__ import annotations
 
+import copy
+
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -72,6 +74,7 @@ async def test_A_customer_reload_persists_the_demo_delivery_exactly_once(
 ):
     make_client, test_session = restart_env
     client = make_client()
+    _flag_on(monkeypatch)
     async with client:
         mission_id = await _paid_confirmed_mission(
             client, install_mock_discovery, sample_products, "deliverA@m22p3.test"
@@ -115,7 +118,7 @@ async def test_A_customer_reload_persists_the_demo_delivery_exactly_once(
 # B. The deployment switch is the only difference between reload behaviors.
 # --------------------------------------------------------------------------- #
 async def test_B_flag_off_keeps_the_order_confirmed_on_reload(
-    restart_env, install_mock_discovery, sample_products, mock_razorpay
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, monkeypatch
 ):
     make_client, test_session = restart_env
     client = make_client()
@@ -123,6 +126,10 @@ async def test_B_flag_off_keeps_the_order_confirmed_on_reload(
         mission_id = await _paid_confirmed_mission(
             client, install_mock_discovery, sample_products, "deliverB@m22p3.test"
         )
+
+        # The demo .env ships the switch ON for the live demo, so the OFF leg pins it
+        # explicitly — the test proves the switch, not the ambient environment.
+        monkeypatch.setattr(get_settings(), "shopping_demo_delivery_enabled", False)
 
         # Default posture (switch off): a reload changes nothing.
         first = await client.get(f"/missions/{mission_id}/order")
@@ -182,9 +189,12 @@ async def test_D_unverified_payment_never_delivers(
         )
         # Directly unpersist the payment's verified status: the order row still says
         # order_confirmed, but the payment this reload would lean on no longer proves it.
+        # deepcopy, not dict(): a shallow copy shares the payment sub-dict with the
+        # committed state, so the in-place mutation reads through both references and
+        # SQLAlchemy skips the write as a no-change assignment.
         async with test_session() as session:
             mission = await session.get(MissionRecord, mission_id)
-            intent = dict(mission.shopping_intent)
+            intent = copy.deepcopy(mission.shopping_intent)
             intent["payment"]["status"] = "pending"
             mission.shopping_intent = intent
             await session.commit()

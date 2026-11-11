@@ -49,7 +49,7 @@ export function PaymentPanel({
             <p className="font-display text-base text-text-charcoal">Razorpay test checkout</p>
           </div>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-800">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-status-info-soft px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-status-info">
           <ShieldCheck size={11} className="shrink-0" />
           Razorpay TEST MODE
         </span>
@@ -89,11 +89,11 @@ export function PaymentPanel({
       </div>
 
       {status === "verified" ? (
-        <div className="mt-4 flex items-start gap-2.5 rounded-xl bg-emerald-500/10 p-3.5 text-xs text-emerald-900 border border-emerald-500/25">
-          <CheckCircle2 size={16} className="shrink-0 text-emerald-700 mt-0.5" />
+        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-status-success/25 bg-status-success-soft p-3.5 text-xs text-status-success">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-status-success" />
           <div>
-            <p className="font-semibold text-emerald-800">Payment verified (TEST MODE)</p>
-            <p className="mt-0.5 text-emerald-700">
+            <p className="font-semibold text-status-success">Payment verified (TEST MODE)</p>
+            <p className="mt-0.5 text-status-success/90">
               The payment signature was verified by the RESOLVE backend
               {payment?.verified_at
                 ? ` on ${new Date(payment.verified_at).toLocaleString()}`
@@ -103,7 +103,7 @@ export function PaymentPanel({
           </div>
         </div>
       ) : status === "failed" ? (
-        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3.5 text-xs text-primary-rose">
+        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-status-failure/25 bg-status-failure-soft p-3.5 text-xs text-status-failure">
           <XCircle size={16} className="shrink-0 mt-0.5" />
           <div>
             <p className="font-semibold">Test payment failed</p>
@@ -115,11 +115,11 @@ export function PaymentPanel({
           </div>
         </div>
       ) : status === "pending" ? (
-        <div className="mt-4 flex items-start gap-2.5 rounded-xl bg-amber-500/10 p-3.5 text-xs text-amber-900 border border-amber-500/25">
-          <Loader2 size={16} className="shrink-0 animate-spin text-amber-700 mt-0.5" />
+        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-status-pending/25 bg-status-pending-soft p-3.5 text-xs text-status-pending">
+          <Loader2 size={16} className="shrink-0 animate-spin mt-0.5" />
           <div>
-            <p className="font-semibold text-amber-800">Test payment in progress</p>
-            <p className="mt-0.5 text-amber-700">
+            <p className="font-semibold text-status-pending">Test payment in progress</p>
+            <p className="mt-0.5 text-status-pending/90">
               A Razorpay TEST order has been created. Complete the payment in the Razorpay
               window — the mission is marked verified only after the backend checks Razorpay&apos;s
               signature.
@@ -129,7 +129,7 @@ export function PaymentPanel({
       ) : null}
 
       {error && (
-        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3 text-xs font-medium text-primary-rose">
+        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-status-failure/20 bg-status-failure-soft p-3 text-xs font-medium text-status-failure">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           {error}
         </div>
@@ -147,7 +147,7 @@ export function PaymentPanel({
             <button
               onClick={onProceed}
               disabled={isProcessing}
-              className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-5 py-2.5 text-xs font-semibold text-surface shadow-soft transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-xl bg-status-pending px-5 py-2.5 text-xs font-semibold text-surface shadow-soft transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isProcessing ? (
                 <>

@@ -1,27 +1,33 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
 export function Hero() {
+  const reduceMotion = useReducedMotion();
+  const rise = (duration: number, delay: number) =>
+    reduceMotion
+      ? {}
+      : {
+          initial: { opacity: 0, y: 12 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration, delay },
+        };
+
   return (
     <section className="relative overflow-hidden px-6 pb-24 pt-20 lg:px-10 lg:pt-28">
       <div className="mx-auto max-w-4xl text-center">
         <motion.span
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
+          {...rise(0.5, 0)}
           className="mb-6 inline-block rounded-full bg-neutral-blush/60 px-4 py-1.5 text-xs font-medium text-primary-rose"
         >
           Built on Razorpay · bounded by a deterministic Authority Engine
         </motion.span>
 
         <motion.h1
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, delay: 0.1 }}
+          {...rise(0.6, 0.1)}
           className="font-display text-4xl leading-[1.1] tracking-tight text-text-charcoal sm:text-5xl lg:text-6xl"
         >
           From payment completed
@@ -30,9 +36,7 @@ export function Hero() {
         </motion.h1>
 
         <motion.p
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, delay: 0.2 }}
+          {...rise(0.6, 0.2)}
           className="mx-auto mt-6 max-w-xl text-base text-text-charcoal/65 sm:text-lg"
         >
           RESOLVE watches what happens after your money moves, negotiates a fix with the
@@ -40,9 +44,7 @@ export function Hero() {
         </motion.p>
 
         <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, delay: 0.3 }}
+          {...rise(0.6, 0.3)}
           className="mt-9 flex items-center justify-center gap-4"
         >
           <Link href="/workspace">
@@ -56,9 +58,7 @@ export function Hero() {
 
       {/* Floating live-mission visual, mirroring a real fintech hero rather than a static screenshot */}
       <motion.div
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.7, delay: 0.4 }}
+        {...rise(0.7, 0.4)}
         className="relative mx-auto mt-16 max-w-3xl"
       >
         <Card className="grain-overlay relative overflow-visible bg-gradient-to-br from-neutral-blush/50 to-neutral-sand/40 p-8">

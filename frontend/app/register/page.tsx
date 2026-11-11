@@ -109,7 +109,7 @@ export default function RegisterPage() {
 
         <Card className="mt-8 p-8 shadow-soft">
           {error && (
-            <div className="mb-6 flex items-start gap-2.5 rounded-xl bg-primary-rose/10 p-4 text-primary-rose">
+            <div className="mb-6 flex items-start gap-2.5 rounded-xl bg-status-failure-soft p-4 text-status-failure">
               <AlertCircle size={18} className="mt-0.5 shrink-0" />
               <p className="text-sm font-medium">{error}</p>
             </div>

@@ -1,11 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { Sidebar } from "@/components/workspace/Sidebar";
+import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { PromptBox } from "@/components/workspace/PromptBox";
+import { ToolActivity } from "@/components/workspace/ToolActivity";
 import { Card } from "@/components/ui/Card";
+import { Drawer } from "@/components/ui/Drawer";
+import { Markdown } from "@/components/ui/Markdown";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { MissionContextPanel } from "@/components/workspace/MissionContextPanel";
 import { ProductResults } from "@/components/workspace/ProductResults";
@@ -26,6 +30,7 @@ import {
   revokeAuthority,
 } from "@/lib/api";
 import { formatMoney, missionStatusLabel } from "@/lib/format";
+import { useConversationScroll } from "@/lib/useConversationScroll";
 import type {
   AgentConversationEvent,
   AgentToolTraceEntry,
@@ -41,16 +46,13 @@ import type {
 } from "@/lib/types";
 import {
   AlertCircle,
+  ArrowDown,
   CheckCircle2,
   Loader2,
-  Menu,
-  PanelRightOpen,
-  RefreshCw,
   Shield,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
-  X,
 } from "lucide-react";
 
 /**
@@ -175,6 +177,10 @@ function transcriptFromEvents(events: AgentConversationEvent[]): ConversationMes
         state: payload.next_state ?? null,
         error_code: payload.error_code ?? null,
       });
+    } else if (event.event_type === "system_state_change") {
+      if (event.content) {
+        messages.push({ role: "system", content: event.content });
+      }
     } else if (event.event_type === "agent_message") {
       messages.push({
         role: "agent",
@@ -232,8 +238,8 @@ export default function WorkspacePage() {
 
   const [missionsDrawerOpen, setMissionsDrawerOpen] = useState(false);
   const [contextDrawerOpen, setContextDrawerOpen] = useState(false);
-
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [contextPanelOpen, setContextPanelOpen] = useState(true);
 
   const selected = missions.find((m) => m.mission_id === selectedId) ?? null;
   const isShoppingMission = selected?.mission_type === "shopping";
@@ -249,12 +255,31 @@ export default function WorkspacePage() {
     (message) => (message.products?.length ?? 0) > 0
   );
 
+  const { containerRef, showJumpToLatest, jumpToLatest, stickNow } = useConversationScroll(
+    [currentConversation.length, isAgentThinking, selectedId],
+    selectedId
+  );
+
   // Protected workspace: redirect to /login if unauthenticated
   useEffect(() => {
     if (!isAuthLoading && !user) {
       router.replace("/login");
     }
   }, [user, isAuthLoading, router]);
+
+  // Sidebar collapse survives reloads; the context panel resets to open every visit.
+  useEffect(() => {
+    if (window.localStorage.getItem("resolve.sidebarCollapsed") === "1") {
+      setSidebarCollapsed(true);
+    }
+  }, []);
+
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      window.localStorage.setItem("resolve.sidebarCollapsed", prev ? "0" : "1");
+      return !prev;
+    });
+  }, []);
 
   const refreshMissions = useCallback(
     async (quiet = false) => {
@@ -396,10 +421,6 @@ export default function WorkspacePage() {
     [appendMessage, syncMission]
   );
 
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [currentConversation.length, isAgentThinking, selectedId]);
-
   // Switching missions clears every transient, including a checkout review or order record that
   // belongs to the mission being left. The state itself is then re-read, not remembered.
   useEffect(() => {
@@ -530,6 +551,7 @@ export default function WorkspacePage() {
 
     const missionId = selectedId;
     appendMessage(missionId, { role: "user", content: text });
+    stickNow();
     setIsAgentThinking(true);
 
     try {
@@ -873,6 +895,34 @@ export default function WorkspacePage() {
     }
   };
 
+  // M22 §2: the buyer's answers to the category's intake questions. Only the answers travel;
+  // the backend validates them against the issue's own question set and records them as
+  // assessment context that authorizes nothing.
+  const handleSubmitIssueAnswers = async (
+    issueId: string,
+    answers: Record<string, string>
+  ): Promise<boolean> => {
+    if (!selectedId || isIssueBusy) return false;
+    const missionId = selectedId;
+    setIsIssueBusy(true);
+    setIssueError(null);
+    try {
+      await apiRequest(`/missions/${missionId}/order/issues/${issueId}/answers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers }),
+      });
+      await finishStep(missionId, "Issue answers recorded", null);
+      return true;
+    } catch (err) {
+      setIssueError(messageOf(err));
+      await finishStep(missionId, "Issue answers refused", null);
+      return false;
+    } finally {
+      setIsIssueBusy(false);
+    }
+  };
+
   /**
    * One controlled post-purchase operation (Tasks 10, 11A, 12A, 12B, 13, 14B.5A).
    *
@@ -922,7 +972,7 @@ export default function WorkspacePage() {
 
   if (isAuthLoading || !user) {
     return (
-      <div className="flex h-screen items-center justify-center bg-surface">
+      <div className="flex h-dvh items-center justify-center bg-surface">
         <div className="flex items-center gap-2.5 text-text-charcoal/60">
           <Loader2 size={20} className="animate-spin text-accent-terracotta" />
           <span className="text-sm font-medium">Authenticating session...</span>
@@ -936,12 +986,20 @@ export default function WorkspacePage() {
     (m) => m.mission_type !== "shopping" && m.status !== "resolved"
   ).length;
   const resolvedMissionsCount = missions.filter((m) => m.status === "resolved").length;
+  // Announced through the sr-only live region below so screen readers hear each turn
+  // without the whole transcript being re-read.
+  const latestMessage =
+    currentConversation.length > 0
+      ? currentConversation[currentConversation.length - 1]
+      : null;
 
-  const sidebar = (
+  const renderSidebar = (collapsed: boolean) => (
     <Sidebar
       missions={missions}
       selectedId={selectedId}
       isLoading={isMissionsLoading}
+      collapsed={collapsed}
+      onToggleCollapse={toggleSidebarCollapsed}
       onSelect={(id) => {
         setSelectedId(id);
         setMissionsDrawerOpen(false);
@@ -972,81 +1030,38 @@ export default function WorkspacePage() {
   );
 
   return (
-    <div className="flex h-screen overflow-hidden bg-surface">
+    <div className="flex h-dvh overflow-hidden bg-surface">
       {/* LEFT — the buyer's own missions, exactly as the authenticated list returns them */}
-      <div className="hidden h-full md:block">{sidebar}</div>
-      {missionsDrawerOpen && (
-        <div className="fixed inset-0 z-40 flex md:hidden">
-          <button
-            aria-label="Close mission list"
-            onClick={() => setMissionsDrawerOpen(false)}
-            className="flex-1 bg-text-charcoal/30"
-          />
-          <div className="h-full w-80 max-w-[85%] bg-surface">{sidebar}</div>
-        </div>
-      )}
+      <div className="hidden h-full lg:block">{renderSidebar(sidebarCollapsed)}</div>
+      <Drawer
+        open={missionsDrawerOpen}
+        onClose={() => setMissionsDrawerOpen(false)}
+        title="Missions"
+        side="left"
+      >
+        {renderSidebar(false)}
+      </Drawer>
 
       {/* CENTER — one continuous conversation: the primary surface of the product */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex shrink-0 items-center gap-3 border-b border-text-charcoal/8 bg-surface px-4 py-3 sm:px-6">
-          <button
-            onClick={() => setMissionsDrawerOpen(true)}
-            aria-label="Open mission list"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-text-charcoal/10 text-text-charcoal/55 transition hover:bg-neutral-sand/25 md:hidden"
-          >
-            <Menu size={15} />
-          </button>
-
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="hidden shrink-0 items-center gap-2 font-display text-sm sm:flex">
-              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary-rose text-[10px] text-surface">
-                R
-              </span>
-              RESOLVE
-            </span>
-            {selected ? (
-              <>
-                <span className="truncate font-display text-base">{selected.objective}</span>
-                <StatusPill status={selected.status} />
-              </>
-            ) : (
-              <span className="truncate text-xs font-semibold uppercase tracking-wider text-accent-terracotta">
-                Authenticated workspace
-              </span>
-            )}
-          </div>
-
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            {selected && (
-              <button
-                onClick={() => setContextDrawerOpen(true)}
-                aria-label="Open mission context"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-text-charcoal/10 text-text-charcoal/55 transition hover:bg-neutral-sand/25 xl:hidden"
-              >
-                <PanelRightOpen size={15} />
-              </button>
-            )}
-            <button
-              onClick={() => refreshMissions()}
-              title="Refresh from RESOLVE"
-              className="flex h-8 w-8 items-center justify-center rounded-full border border-text-charcoal/10 text-text-charcoal/50 transition hover:bg-neutral-sand/20 hover:text-text-charcoal"
-            >
-              <RefreshCw size={14} className={isMissionsLoading ? "animate-spin" : ""} />
-            </button>
-            {selected && (
-              <button
-                onClick={() => setSelectedId(null)}
-                aria-label="Close this mission"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-text-charcoal/10 text-text-charcoal/55 transition hover:bg-neutral-sand/25"
-              >
-                <X size={15} />
-              </button>
-            )}
-          </div>
-        </header>
+        <WorkspaceHeader
+          mission={selected}
+          showBrand={sidebarCollapsed}
+          isRefreshing={isMissionsLoading}
+          onOpenMissions={() => setMissionsDrawerOpen(true)}
+          onToggleContext={() => {
+            if (window.matchMedia("(min-width: 1280px)").matches) {
+              setContextPanelOpen((v) => !v);
+            } else {
+              setContextDrawerOpen(true);
+            }
+          }}
+          onRefresh={() => refreshMissions()}
+          onCloseMission={() => setSelectedId(null)}
+        />
 
         {missionError && (
-          <div className="flex items-center justify-between gap-3 bg-primary-rose/10 px-4 py-2 text-xs text-primary-rose sm:px-6">
+          <div className="flex items-center justify-between gap-3 bg-status-failure-soft px-4 py-2 text-xs text-status-failure sm:px-6">
             <div className="flex items-center gap-2">
               <AlertCircle size={14} className="shrink-0" />
               <span>{missionError}</span>
@@ -1060,7 +1075,19 @@ export default function WorkspacePage() {
           </div>
         )}
 
-        <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <div aria-live="polite" role="status" className="sr-only">
+          {isAgentThinking
+            ? "RESOLVE is working on your message."
+            : latestMessage?.role === "agent" && latestMessage.content
+              ? `RESOLVE replied: ${latestMessage.content}`
+              : ""}
+        </div>
+
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={containerRef}
+            className="scrollbar-thin h-full overflow-y-auto px-4 py-5 sm:px-6"
+          >
           {selected ? (
             <div className="mx-auto w-full max-w-3xl space-y-4">
               {currentConversation.length === 0 && (
@@ -1073,19 +1100,19 @@ export default function WorkspacePage() {
 
               {currentConversation.map((message, index) =>
                 message.role === "user" ? (
-                  <div key={`user-${index}`} className="flex justify-end">
+                  <div key={`user-${index}`} className="flex animate-fade-in justify-end">
                     <div className="max-w-xl rounded-2xl bg-accent-terracotta px-4 py-3 text-surface shadow-soft">
                       <p className="text-sm">{message.content}</p>
                     </div>
                   </div>
                 ) : message.role === "system" ? (
-                  <div key={`system-${index}`} className="flex justify-center">
+                  <div key={`system-${index}`} className="flex animate-fade-in justify-center">
                     <p className="max-w-xl rounded-lg bg-neutral-sand/25 px-3 py-1.5 text-center text-[11px] text-text-charcoal/55">
                       {message.content}
                     </p>
                   </div>
                 ) : (
-                  <div key={`agent-${index}`} className="flex justify-start">
+                  <div key={`agent-${index}`} className="flex animate-fade-in justify-start">
                     <Card className="w-full max-w-xl p-4 shadow-card">
                       <div className="mb-2 flex items-center gap-2">
                         <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary-rose text-[10px] font-bold text-surface">
@@ -1097,42 +1124,14 @@ export default function WorkspacePage() {
                       </div>
 
                       {message.content && (
-                        <p className="text-sm text-text-charcoal/85">{message.content}</p>
+                        <Markdown
+                          content={message.content}
+                          className="text-sm text-text-charcoal/85"
+                        />
                       )}
 
                       {message.tools && message.tools.length > 0 && (
-                        <div className="mt-3 rounded-xl bg-neutral-sand/20 p-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-charcoal/60">
-                            Steps the agent ran
-                          </p>
-                          <ul className="mt-1.5 space-y-1">
-                            {message.tools.map((step, stepIndex) => (
-                              <li
-                                key={`${step.tool}-${stepIndex}`}
-                                className="flex items-start gap-1.5 text-xs text-text-charcoal/70"
-                              >
-                                {step.success ? (
-                                  <CheckCircle2
-                                    size={13}
-                                    className="mt-0.5 shrink-0 text-emerald-700"
-                                  />
-                                ) : (
-                                  <AlertCircle
-                                    size={13}
-                                    className="mt-0.5 shrink-0 text-primary-rose"
-                                  />
-                                )}
-                                <span>
-                                  {humanize(step.tool)}
-                                  {step.state ? ` → ${humanize(step.state)}` : ""}
-                                  {step.error_code
-                                    ? ` (refused: ${humanize(step.error_code)})`
-                                    : ""}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
+                        <ToolActivity tools={message.tools} />
                       )}
 
                       {(message.authority ||
@@ -1160,20 +1159,20 @@ export default function WorkspacePage() {
                             <div
                               className={`rounded-xl p-3 ${
                                 message.authority.approved
-                                  ? "bg-emerald-100/50 text-emerald-800"
-                                  : "bg-primary-rose/10 text-primary-rose"
+                                  ? "bg-status-success-soft text-status-success"
+                                  : "bg-status-failure-soft text-status-failure"
                               }`}
                             >
                               <div className="flex items-start gap-2">
                                 {message.authority.approved ? (
                                   <CheckCircle2
                                     size={15}
-                                    className="mt-0.5 shrink-0 text-emerald-700"
+                                    className="mt-0.5 shrink-0"
                                   />
                                 ) : (
                                   <AlertCircle
                                     size={15}
-                                    className="mt-0.5 shrink-0 text-primary-rose"
+                                    className="mt-0.5 shrink-0"
                                   />
                                 )}
                                 <div>
@@ -1248,8 +1247,8 @@ export default function WorkspacePage() {
               {isShoppingMission &&
                 selectedProduct &&
                 selected.status === "product_selected" && (
-                  <Card className="flex flex-wrap items-center justify-between gap-3 border-emerald-500/25 bg-emerald-500/10 p-4">
-                    <p className="text-xs text-emerald-800">
+                  <Card className="flex flex-wrap items-center justify-between gap-3 border-status-success/25 bg-status-success-soft p-4">
+                    <p className="text-xs text-status-success">
                       A product is selected on this mission. Nothing has been ordered or paid —
                       opening the checkout review is the next step, and confirming it stays yours.
                     </p>
@@ -1333,6 +1332,7 @@ export default function WorkspacePage() {
                     error={issueError}
                     delegatedActions={selected?.allowed_actions ?? []}
                     onReport={handleReportIssue}
+                    onSubmitAnswers={handleSubmitIssueAnswers}
                     onAssess={handleAssessIssue}
                     onReassess={handleReassessIssue}
                     onRefund={handleExecuteRefund}
@@ -1342,8 +1342,6 @@ export default function WorkspacePage() {
                     onManualReview={handleManualReview}
                   />
                 )}
-
-              <div ref={scrollRef} />
             </div>
           ) : (
             /* No mission open: start one, or pick an existing one back up. */
@@ -1373,7 +1371,7 @@ export default function WorkspacePage() {
                   <p className="text-xs font-medium uppercase tracking-wider text-text-charcoal/50">
                     Resolved Missions
                   </p>
-                  <p className="mt-2 font-display text-3xl text-emerald-700">
+                  <p className="mt-2 font-display text-3xl text-status-success">
                     {resolvedMissionsCount}
                   </p>
                   <p className="mt-1 text-xs text-text-charcoal/50">
@@ -1484,7 +1482,16 @@ export default function WorkspacePage() {
                         <Card
                           key={m.mission_id}
                           onClick={() => setSelectedId(m.mission_id)}
-                          className="cursor-pointer p-5 transition hover:shadow-soft hover:border-accent-terracotta/40 active:scale-[0.99]"
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open mission: ${m.objective}`}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setSelectedId(m.mission_id);
+                            }
+                          }}
+                          className="cursor-pointer p-5 transition hover:shadow-soft hover:border-accent-terracotta/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-rose active:scale-[0.99]"
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="flex min-w-0 items-start gap-1.5">
@@ -1521,6 +1528,19 @@ export default function WorkspacePage() {
               </div>
             </div>
           )}
+          </div>
+          {selected && showJumpToLatest && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+              <button
+                type="button"
+                onClick={jumpToLatest}
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-text-charcoal/10 bg-surface px-3.5 py-1.5 text-xs font-semibold text-text-charcoal shadow-card transition hover:bg-neutral-sand/25"
+              >
+                <ArrowDown size={13} />
+                Jump to latest
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="shrink-0">
@@ -1541,23 +1561,20 @@ export default function WorkspacePage() {
       </main>
 
       {/* RIGHT — the mission context RESOLVE is currently holding */}
-      {selected && (
+      {selected && contextPanelOpen && (
         <aside className="scrollbar-thin hidden w-[22rem] shrink-0 overflow-y-auto border-l border-text-charcoal/8 bg-neutral-sand/10 px-4 py-4 xl:block">
           {contextPanel}
         </aside>
       )}
-      {selected && contextDrawerOpen && (
-        <div className="fixed inset-0 z-40 flex justify-end xl:hidden">
-          <button
-            aria-label="Close mission context"
-            onClick={() => setContextDrawerOpen(false)}
-            className="flex-1 bg-text-charcoal/30"
-          />
-          <div className="scrollbar-thin h-full w-[22rem] max-w-[85%] overflow-y-auto bg-surface px-4 py-4">
-            {contextPanel}
-          </div>
-        </div>
-      )}
+      <Drawer
+        open={selected != null && contextDrawerOpen}
+        onClose={() => setContextDrawerOpen(false)}
+        title="Mission context"
+        side="right"
+        className="w-[22rem]"
+      >
+        <div className="px-4 py-4">{contextPanel}</div>
+      </Drawer>
     </div>
   );
 }

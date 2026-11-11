@@ -39,7 +39,7 @@ export function ProblemSection() {
         <div className="mt-14 grid gap-6 md:grid-cols-2">
           <Card className="p-8">
             <p className="text-xs font-medium uppercase tracking-wide text-text-charcoal/45">
-              Today — you're the orchestrator
+              Today — you&apos;re the orchestrator
             </p>
             <ul className="mt-5 space-y-3">
               {MANUAL_STEPS.map((step, i) => (
