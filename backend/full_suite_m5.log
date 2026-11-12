@@ -1,0 +1,68 @@
+time="2026-11-12T19:04:39+05:30" level=warning msg="D:\\RAZORPAY\\resolve\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container resolve-db-1 Running 
+ Container resolve-db-1 Waiting 
+ Container resolve-db-1 Healthy 
+ Container resolve-backend-run-520aa18455b0 Creating 
+ Container resolve-backend-run-520aa18455b0 Created 
+........................................................................ [  4%]
+.....F.....................F............................................ [  9%]
+........................................................................ [ 13%]
+........................................................................ [ 18%]
+........................................................................ [ 23%]
+........................................................................ [ 27%]
+........................................................................ [ 32%]
+..........ssssssssssss.........................ssss..................... [ 36%]
+........................................................................ [ 41%]
+........................................................................ [ 46%]
+...................F.................................................s.. [ 50%]
+...............................................F.F...................... [ 55%]
+F.......F...........F......F.F.........F................................ [ 59%]
+........................................................................ [ 64%]
+........................................................................ [ 69%]
+........................................................................ [ 73%]
+........................................................................ [ 78%]
+........................................................................ [ 82%]
+........................................................................ [ 87%]
+........................................................................ [ 92%]
+........................................................................ [ 96%]
+...................................................                      [100%]
+=================================== FAILURES ===================================
+/app/tests/test_core2_agent_security.py:542: AssertionError: conversation.py
+/app/tests/test_core3a_golden_lifecycle.py:614: KeyError: 'event'
+/app/tests/test_privacy_foundation.py:362: KeyError: 'event'
+/app/tests/test_replacement_execution.py:451: KeyError: 'event'
+/app/tests/test_replacement_execution.py:514: KeyError: 'event'
+/app/tests/test_resolution_assessment.py:546: AssertionError: assert [{'content': ...e', ...}, ...] == []
+/app/tests/test_resolution_assessment.py:899: AssertionError: assert [{'content': ...e', ...}, ...] == []
+/app/tests/test_resolution_orchestrator.py:583: KeyError: 'event'
+/app/tests/test_return_execution.py:411: KeyError: 'event'
+/app/tests/test_return_execution.py:479: KeyError: 'event'
+/app/tests/test_return_execution.py:947: KeyError: 'event'
+=============================== warnings summary ===============================
+../usr/local/lib/python3.11/site-packages/razorpay/client.py:4
+  /usr/local/lib/python3.11/site-packages/razorpay/client.py:4: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../usr/local/lib/python3.11/site-packages/starlette/testclient.py:40
+  /usr/local/lib/python3.11/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+tests/test_core3a_golden_lifecycle.py::test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer
+  tests/test_core3a_golden_lifecycle.py:992: PytestWarning: The test <Function test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_no_shopify_client_factory_and_no_payment_call_live_in_the_agent_layer():
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_core2_agent_security.py::test_the_agent_layer_writes_no_sql_and_reads_no_raw_rows
+FAILED tests/test_core3a_golden_lifecycle.py::test_golden_lifecycle_from_natural_language_to_an_audited_outcome
+FAILED tests/test_privacy_foundation.py::test_manual_review_optout_persists_idempotent_and_authorization_bound
+FAILED tests/test_replacement_execution.py::test_accepted_request_becomes_requested_never_confirmed
+FAILED tests/test_replacement_execution.py::test_provider_rejection_persists_failed_safely
+FAILED tests/test_resolution_assessment.py::test_outage_writes_nothing_and_retry_works
+FAILED tests/test_resolution_assessment.py::test_ws_event_emitted_once - Asse...
+FAILED tests/test_resolution_orchestrator.py::test_websocket_events_never_claim_false_completion
+FAILED tests/test_return_execution.py::test_provider_accepted_then_confirmed
+FAILED tests/test_return_execution.py::test_provider_rejection_persisted_and_retried_same_row
+FAILED tests/test_return_execution.py::test_lost_answer_becomes_outcome_unknown_and_next_attempt_only_reads
+11 failed, 1535 passed, 17 skipped, 3 warnings in 844.40s (0:14:04)
+

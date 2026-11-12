@@ -160,6 +160,14 @@ class ResolveOrderRecord(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Demo-environment delivery PROGRESSION (buildathon sprint M2). The demo ladder
+    # packed -> shipped -> out_for_delivery -> delivered advances on the customer's own
+    # order reads, time-gated per stage, with `delivery_stage_at` stamping when the
+    # current stage landed. Nullable and demo-only: delivery_mode names the simulation,
+    # and a future carrier integration would write its own facts, never these.
+    delivery_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delivery_stage_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # M22 §4 — the delivery destination the CUSTOMER confirmed on this order. Stored server-side
     # from the customer's own submission; a replacement request needs one before any provider is
     # contacted, because a shipment without a confirmed destination cannot be honestly requested.
@@ -279,6 +287,13 @@ class ResolutionAssessmentRecord(Base):
 
     authority_decision: Mapped[str] = mapped_column(String(16))  # allow | deny | escalate
     decision_reason: Mapped[str] = mapped_column(Text)
+
+    # Layer A (buildathon sprint): the assessor's independent per-remedy eligibility
+    # verdicts, so the buyer can see refund AND replacement evaluated separately and
+    # choose. Shape {"refund": {"eligibility": ..., "reason": ...}, "replacement": {...}}.
+    # Nullable: assessments written before this column (or by a provider that did not
+    # return verdicts) simply have none — the client shows "not evaluated".
+    remedy_eligibility: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

@@ -49,6 +49,11 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
         # past confirmation has neither, which is the truth for it.
         ("delivered_at", "delivered_at TIMESTAMP"),
         ("delivery_mode", "delivery_mode VARCHAR(32)"),
+        # Buildathon sprint M2: the demo delivery PROGRESSION (packed -> shipped ->
+        # out_for_delivery -> delivered). Nullable — an order still sitting at confirmation
+        # has no stage, which is the truth for it.
+        ("delivery_stage", "delivery_stage VARCHAR(32)"),
+        ("delivery_stage_at", "delivery_stage_at TIMESTAMP"),
         # M22 §4: the delivery destination the customer confirmed, and M22 §1/§7: the one
         # review of the delivered order. All nullable — absent means "not yet given", which
         # is the truth for it.
@@ -81,6 +86,12 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
     "purchase_authorizations": (
         ("submission_state", "submission_state VARCHAR(16) NOT NULL DEFAULT 'idle'"),
         ("submission_owner", "submission_owner VARCHAR(64)"),
+    ),
+    # Buildathon sprint M3: the assessor's independent per-remedy eligibility verdicts
+    # (Layer A). Nullable — an assessment row from before this contract has no verdicts,
+    # and the client must show "not evaluated" for it, never infer eligibility.
+    "resolution_assessments": (
+        ("remedy_eligibility", "remedy_eligibility JSON"),
     ),
 }
 
@@ -215,5 +226,12 @@ async def init_models() -> None:
                     inspector,
                     "purchase_authorizations",
                     _SCHEMA_UPGRADES["purchase_authorizations"],
+                )
+            if "resolution_assessments" in inspector.get_table_names():
+                _add_missing(
+                    sync_conn,
+                    inspector,
+                    "resolution_assessments",
+                    _SCHEMA_UPGRADES["resolution_assessments"],
                 )
         await conn.run_sync(_upgrade_sqlite)

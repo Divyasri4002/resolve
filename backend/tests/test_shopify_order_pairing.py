@@ -1007,6 +1007,9 @@ def test_the_paired_state_needed_no_schema_and_adds_no_status_value():
         # M22 later committed the delivery/review facts (all nullable, additive); the pin stays exact.
         "delivered_at",
         "delivery_mode",
+        # M22 P3 demo delivery: the persisted rung of the packed->delivered ladder.
+        "delivery_stage",
+        "delivery_stage_at",
         "shipping_address",
         "shipping_address_confirmed_at",
         "review_rating",

@@ -81,12 +81,19 @@ EXECUTOR_BY_STATUS: dict[str, dict[str, str]] = {
         "requested": ResolutionState.REQUESTED.value,
         "pending": ResolutionState.PENDING.value,
         "failed": ResolutionState.FAILED.value,
+        # Sprint M4: no automated replacement provider is connected, so the executor
+        # routes the issue to manual review instead of surfacing a bare 503. escalated
+        # is terminal (in TERMINAL_STATES): a repeat /resolve replays the record.
+        "escalated": ResolutionState.ESCALATED.value,
     },
     "return": {
         "confirmed": ResolutionState.CONFIRMED.value,
         "requested": ResolutionState.REQUESTED.value,
         "pending": ResolutionState.PENDING.value,
         "failed": ResolutionState.FAILED.value,
+        # Sprint M4: same manual-review routing as replacement when no return provider
+        # is connected.
+        "escalated": ResolutionState.ESCALATED.value,
     },
 }
 

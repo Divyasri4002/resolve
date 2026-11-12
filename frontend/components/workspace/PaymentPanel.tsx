@@ -92,13 +92,19 @@ export function PaymentPanel({
         <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-status-success/25 bg-status-success-soft p-3.5 text-xs text-status-success">
           <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-status-success" />
           <div>
-            <p className="font-semibold text-status-success">Payment verified (TEST MODE)</p>
+            <p className="font-semibold text-status-success">Payment verified — TEST MODE</p>
             <p className="mt-0.5 text-status-success/90">
-              The payment signature was verified by the RESOLVE backend
+              Razorpay&apos;s payment signature was verified by the RESOLVE backend with
+              HMAC-SHA256
               {payment?.verified_at
                 ? ` on ${new Date(payment.verified_at).toLocaleString()}`
                 : ""}
               . This was a test-mode transaction — no real money moved.
+            </p>
+            <p className="mt-1 text-status-success/90">
+              {missionStatus === "payment_verified"
+                ? "Next, server-side: RESOLVE creates its permanent order record for this purchase."
+                : "RESOLVE's permanent order record for this purchase has been created server-side."}
             </p>
           </div>
         </div>

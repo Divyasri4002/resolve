@@ -16,8 +16,10 @@ import {
   AlertCircle,
   CheckCircle2,
   ClipboardList,
+  ImagePlus,
   Loader2,
   MessageSquareWarning,
+  ShieldCheck,
 } from "lucide-react";
 
 const ISSUE_TYPES = [
@@ -228,6 +230,239 @@ function IssueAnswersForm({
   );
 }
 
+/**
+ * Sprint M3 Layer A: the assessor's independent per-remedy eligibility verdicts. A verdict is
+ * displayed exactly as the assessor returned it — a missing entry (or an assessment that
+ * predates this contract, `remedy_eligibility` null) is shown as "not evaluated", never
+ * inferred. Eligibility executes nothing; the Authority Engine (Layer B) gates every run.
+ */
+function RemedyEligibilityView({
+  assessment,
+}: {
+  assessment: NonNullable<OrderIssue["assessment"]>;
+}) {
+  const verdicts = assessment.remedy_eligibility ?? null;
+  const remedies = [
+    { key: "refund" as const, label: "Refund" },
+    { key: "replacement" as const, label: "Replacement" },
+  ];
+  const LABELS: Record<string, string> = {
+    eligible: "Eligible",
+    ineligible: "Ineligible",
+    needs_review: "Needs review",
+  };
+
+  return (
+    <div className="mt-2 rounded-lg border border-text-charcoal/10 bg-neutral-sand/10 p-2.5">
+      <p className="font-semibold uppercase tracking-wider text-text-charcoal/50">
+        Layer A — remedy eligibility (independent checks)
+      </p>
+      {verdicts ? (
+        <>
+          <div className="mt-1.5 space-y-1.5">
+            {remedies.map(({ key, label }) => {
+              const verdict = verdicts[key];
+              const eligibility = verdict?.eligibility ?? "needs_review";
+              const shown = LABELS[eligibility] ?? eligibility;
+              return (
+                <div key={key} className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    tone={
+                      eligibility === "eligible"
+                        ? "success"
+                        : eligibility === "ineligible"
+                          ? "failure"
+                          : "pending"
+                    }
+                  >
+                    {label}: {shown}
+                  </Badge>
+                  {verdict?.reason && (
+                    <span className="min-w-0 flex-1 text-text-charcoal/60">{verdict.reason}</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-1.5 text-text-charcoal/45">
+            Each remedy was judged independently of the other and of the proposal. When both are
+            eligible, the choice between them is yours — eligibility alone runs nothing.
+          </p>
+        </>
+      ) : (
+        <p className="mt-1.5 text-text-charcoal/55">
+          Per-remedy eligibility was not evaluated for this assessment.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Sprint M3 Layer B: the deterministic Authority Engine trace for each remedy — the same
+ * verdict the executor re-checks on every click, shown before anything is executed.
+ */
+function RemedyAuthorityTrace({ issue }: { issue: OrderIssue }) {
+  const refund = issue.remedy_authority?.request_refund;
+  const replacement = issue.remedy_authority?.request_replacement;
+  if (!refund && !replacement) return null;
+
+  return (
+    <div className="mt-2 rounded-lg border border-text-charcoal/10 bg-surface p-2.5">
+      <p className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-text-charcoal/50">
+        <ShieldCheck size={11} className="shrink-0" />
+        Layer B — Authority Engine trace (re-checked at execution)
+      </p>
+      <div className="mt-1.5 space-y-1">
+        {refund && (
+          <p className="text-text-charcoal/70">
+            Refund remedy:{" "}
+            <span className="font-semibold">
+              {refund.decision === "allow" ? "allowed by mandate" : refund.decision}
+            </span>
+            {refund.reason ? ` — ${refund.reason}` : ""}
+          </p>
+        )}
+        {replacement && (
+          <p className="text-text-charcoal/70">
+            Replacement remedy:{" "}
+            <span className="font-semibold">
+              {replacement.decision === "allow" ? "allowed by mandate" : replacement.decision}
+            </span>
+            {replacement.reason ? ` — ${replacement.reason}` : ""}
+          </p>
+        )}
+      </div>
+      <p className="mt-1 text-text-charcoal/45">
+        Mandate limits and Razorpay TEST-mode checks are enforced server-side; every execution
+        re-runs this gate against the current mandate.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Sprint M3: the supplement loop. When the assessor marked a remedy `needs_review` (or asked
+ * for more information outright), the buyer is prompted for exactly what was missing — a photo
+ * link and/or a clearer written description — which the backend appends to the issue before
+ * the SAME assessment row is re-evaluated. Evidence items are metadata (a URL and words); the
+ * backend stores what is sent and authorizes nothing on its own.
+ */
+function SupplementEvidenceForm({
+  issue,
+  isProcessing,
+  onSupplement,
+}: {
+  issue: OrderIssue;
+  isProcessing: boolean;
+  onSupplement: (
+    issueId: string,
+    note: string,
+    evidence: { kind: string; url?: string | null; description?: string | null }[]
+  ) => Promise<boolean>;
+}) {
+  const [note, setNote] = useState("");
+  const [photoUrl, setPhotoUrl] = useState("");
+  const [evidenceDetail, setEvidenceDetail] = useState("");
+
+  const needsReviewRemedies = Object.entries(
+    issue.assessment?.remedy_eligibility ?? {}
+  )
+    .filter(([, verdict]) => verdict?.eligibility === "needs_review")
+    .map(([key]) => key);
+  const askedForMore =
+    issue.assessment?.proposed_action === "request_more_information" ||
+    needsReviewRemedies.length > 0;
+  const eligible =
+    issue.assessment?.proposal_source === "reasoning_model" &&
+    askedForMore &&
+    (issue.status === "reported" || issue.status === "under_review") &&
+    !issue.manual_review?.requested;
+
+  if (!eligible) return null;
+
+  const evidence: { kind: string; url?: string | null; description?: string | null }[] = [];
+  if (photoUrl.trim()) evidence.push({ kind: "photo_url", url: photoUrl.trim() });
+  if (evidenceDetail.trim())
+    evidence.push({ kind: "written_description", description: evidenceDetail.trim() });
+  const canSubmit = !isProcessing && (note.trim().length > 0 || evidence.length > 0);
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!canSubmit) return;
+        void onSupplement(issue.issue_id, note.trim(), evidence).then((ok) => {
+          if (ok) {
+            setNote("");
+            setPhotoUrl("");
+            setEvidenceDetail("");
+          }
+        });
+      }}
+      className="mt-2.5 rounded-lg border border-status-pending/30 bg-status-pending-soft/40 p-3 text-[11px]"
+    >
+      <p className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-status-pending">
+        <ImagePlus size={12} className="shrink-0" />
+        More evidence requested
+      </p>
+      <p className="mt-1 text-text-charcoal/60">
+        {needsReviewRemedies.length > 0
+          ? `The eligibility check for ${needsReviewRemedies.join(" and ")} needs more to go on. `
+          : "The assessor asked for more information. "}
+        Add a photo link and/or a clearer description below — the issue is re-assessed against
+        the fuller record. Nothing is executed by supplying evidence.
+      </p>
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        rows={2}
+        maxLength={800}
+        placeholder="What else can you tell us about this issue?"
+        className="mt-2 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
+      />
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <label className="block">
+          <span className="text-text-charcoal/70">Photo link (optional)</span>
+          <input
+            type="url"
+            value={photoUrl}
+            onChange={(e) => setPhotoUrl(e.target.value)}
+            maxLength={500}
+            placeholder="https://…"
+            className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
+          />
+        </label>
+        <label className="block">
+          <span className="text-text-charcoal/70">Evidence description (optional)</span>
+          <input
+            type="text"
+            value={evidenceDetail}
+            onChange={(e) => setEvidenceDetail(e.target.value)}
+            maxLength={500}
+            placeholder="e.g. the box was crushed on arrival"
+            className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
+          />
+        </label>
+      </div>
+      <div className="mt-2 flex items-center justify-end">
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="inline-flex items-center gap-2 rounded-lg border border-status-info/40 px-3 py-1.5 text-[11px] font-semibold text-status-info transition hover:bg-status-info hover:text-surface disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isProcessing ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ImagePlus size={12} />
+          )}
+          {isProcessing ? "Submitting & re-assessing…" : "Submit evidence & re-assess"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 interface IssuePanelProps {
   issues: OrderIssue[];
   isProcessing?: boolean;
@@ -247,6 +482,12 @@ interface IssuePanelProps {
   onResolve: (issueId: string) => Promise<boolean>;
   /** Task 14B.5A: customer opt-out from automated decisions → manual review. */
   onManualReview: (issueId: string) => Promise<boolean>;
+  /** Sprint M3: supplement a needs-review remedy with the evidence the assessor asked for. */
+  onSupplement: (
+    issueId: string,
+    note: string,
+    evidence: { kind: string; url?: string | null; description?: string | null }[]
+  ) => Promise<boolean>;
 }
 
 export function IssuePanel({
@@ -263,6 +504,7 @@ export function IssuePanel({
   onReturn,
   onResolve,
   onManualReview,
+  onSupplement,
 }: IssuePanelProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [issueType, setIssueType] = useState("damaged");
@@ -360,6 +602,33 @@ export function IssuePanel({
                 onSubmitAnswers={onSubmitAnswers}
               />
 
+              {/* Sprint M3: the missing-evidence loop sits between the assessment and the
+                  remedy actions — evidence in, then the same assessment row is re-evaluated. */}
+              <SupplementEvidenceForm
+                issue={issue}
+                isProcessing={isProcessing}
+                onSupplement={onSupplement}
+              />
+
+              {/* Sprint M3: when both remedies pass eligibility, the choice is displayed as
+                  the buyer's — the assessor's proposal is a recommendation, never the pick. */}
+              {issue.assessment?.remedy_eligibility?.refund?.eligibility === "eligible" &&
+                issue.assessment?.remedy_eligibility?.replacement?.eligibility === "eligible" &&
+                issue.refund?.status !== "verified" &&
+                issue.replacement?.status !== "requested" &&
+                issue.replacement?.status !== "confirmed" && (
+                  <div className="mt-2.5 rounded-lg border border-accent-terracotta/25 bg-accent-terracotta/10 p-2.5 text-[11px]">
+                    <p className="font-semibold text-accent-terracotta">
+                      Both remedies passed the eligibility check — the choice is yours
+                    </p>
+                    <p className="mt-0.5 text-text-charcoal/70">
+                      The assessor proposed {actionLabel(issue.assessment.proposed_action)} as a
+                      recommendation, not a decision. Pick a remedy below; neither runs until you
+                      click it, and the Authority Engine re-checks each one at execution.
+                    </p>
+                  </div>
+                )}
+
               {issue.assessment ? (
                 <div className="mt-3 rounded-lg border border-text-charcoal/10 bg-surface p-3 text-[11px]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -401,6 +670,10 @@ export function IssuePanel({
                   <p className="mt-1 text-text-charcoal/55">
                     Decision reason: {issue.assessment.decision_reason}
                   </p>
+                  {/* Sprint M3: Layer A (independent per-remedy eligibility) then Layer B
+                      (the deterministic Authority Engine trace), both display-only. */}
+                  <RemedyEligibilityView assessment={issue.assessment} />
+                  <RemedyAuthorityTrace issue={issue} />
                   <p className="mt-2 flex items-center gap-1.5 rounded-md bg-status-pending-soft px-2 py-1.5 font-semibold text-status-pending">
                     <AlertCircle size={12} className="shrink-0" />
                     {assessmentWarning(issue.assessment)}
@@ -522,7 +795,8 @@ export function IssuePanel({
                 issue.remedy_authority?.request_replacement?.decision === "allow" &&
                 issue.refund?.status !== "verified" &&
                 issue.replacement?.status !== "requested" &&
-                issue.replacement?.status !== "confirmed" && (
+                issue.replacement?.status !== "confirmed" &&
+                issue.replacement?.status !== "escalated" && (
                   <button
                     onClick={() => onReplace(issue.issue_id)}
                     disabled={isProcessing}
@@ -601,7 +875,8 @@ export function IssuePanel({
                 issue.replacement?.status !== "requested" &&
                 issue.replacement?.status !== "confirmed" &&
                 issue.return?.status !== "requested" &&
-                issue.return?.status !== "confirmed" && (
+                issue.return?.status !== "confirmed" &&
+                issue.return?.status !== "escalated" && (
                   <button
                     onClick={() => onReturn(issue.issue_id)}
                     disabled={isProcessing}
@@ -666,8 +941,9 @@ export function IssuePanel({
                   )}
                   <p
                     className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 font-semibold ${
-                      issue.replacement.provider === "none" &&
-                      issue.replacement.status === "pending"
+                      issue.replacement.status === "escalated" ||
+                      (issue.replacement.provider === "none" &&
+                        issue.replacement.status === "pending")
                         ? "bg-status-info-soft text-status-info"
                         : issue.replacement.status === "confirmed"
                           ? "bg-status-success-soft text-status-success"
@@ -675,12 +951,15 @@ export function IssuePanel({
                     }`}
                   >
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
-                    {issue.replacement.provider === "none" &&
-                    issue.replacement.status === "pending"
-                      ? "Replacement capability is not currently connected. " +
-                        (issue.replacement.replacement_note ?? "")
-                      : issue.replacement.replacement_note ??
-                        "No merchant replacement has been confirmed."}
+                    {issue.replacement.status === "escalated"
+                      ? issue.replacement.replacement_note ??
+                        "Routed to manual review / operator escalation — no automated replacement provider is connected. Nothing was ordered and nothing was executed."
+                      : issue.replacement.provider === "none" &&
+                          issue.replacement.status === "pending"
+                        ? "Replacement capability is not currently connected. " +
+                          (issue.replacement.replacement_note ?? "")
+                        : issue.replacement.replacement_note ??
+                          "No merchant replacement has been confirmed."}
                   </p>
                   <p className="mt-1 font-mono text-[10px] text-text-charcoal/40">
                     {issue.replacement.replacement_id}
@@ -736,7 +1015,8 @@ export function IssuePanel({
                   )}
                   <p
                     className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 font-semibold ${
-                      issue.return.provider === "none" && issue.return.status === "pending"
+                      issue.return.status === "escalated" ||
+                      (issue.return.provider === "none" && issue.return.status === "pending")
                         ? "bg-status-info-soft text-status-info"
                         : issue.return.status === "confirmed"
                           ? "bg-status-success-soft text-status-success"
@@ -744,11 +1024,14 @@ export function IssuePanel({
                     }`}
                   >
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
-                    {issue.return.provider === "none" && issue.return.status === "pending"
-                      ? "Return provider not connected. " +
-                        (issue.return.return_note ?? "")
-                      : issue.return.return_note ??
-                        "No merchant return has been confirmed."}
+                    {issue.return.status === "escalated"
+                      ? issue.return.return_note ??
+                        "Routed to manual review / operator escalation — no automated return provider is connected. Nothing was submitted and nothing was executed."
+                      : issue.return.provider === "none" && issue.return.status === "pending"
+                        ? "Return provider not connected. " +
+                          (issue.return.return_note ?? "")
+                        : issue.return.return_note ??
+                          "No merchant return has been confirmed."}
                   </p>
                   <p className="mt-1 font-mono text-[10px] text-text-charcoal/40">
                     {issue.return.return_id}

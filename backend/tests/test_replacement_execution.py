@@ -6,9 +6,9 @@ Pipeline under test:
     -> replacement executor -> ReplacementProvider -> persisted state.
 
 Two facts the suite keeps honest about:
-  * No merchant replacement provider exists in this project, so the DEFAULT provider refuses
-    explicitly. Tests assert that the executor records intent + 'pending' + HTTP 503 and never
-    claims a replacement.
+  * No merchant replacement provider exists in this project, so with the DEFAULT provider the
+    executor routes the replacement to an audited manual-review escalation and never claims a
+    replacement (Sprint M4: honest terminal outcome, not a 503).
   * A test-only fake provider stands in for a future real one (mocks are permitted in automated
     tests ONLY); it is installed through the same seam production uses and is never selectable
     via configuration.
@@ -244,9 +244,10 @@ def test_replacement_switch_does_not_grant_refund_authority(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Items 19, 24 (default reality): no provider connected -> explicit, no false success
+# Sprint M4: no provider connected -> audited manual review / operator escalation
+# (200 + `escalated`, never an opaque 503, never a false success)
 # --------------------------------------------------------------------------- #
-async def test_no_provider_connected_is_explicit_and_unresolved(
+async def test_no_provider_routes_to_manual_review_escalation(
     restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
 ):
     client, test_session, mission_setup = await _setup(
@@ -257,25 +258,51 @@ async def test_no_provider_connected_is_explicit_and_unresolved(
         issue_id = await _authorized_replacement_issue(client, test_session, mission_id)
 
         resp = await _replace(client, mission_id, issue_id)
-        assert resp.status_code == 503
+        assert resp.status_code == 200, resp.text
         data = resp.json()
-        # The 503 detail is a statement of missing capability, not a completed action.
-        assert "No merchant replacement provider is connected" in data["detail"]
+        # `escalated` is a statement of missing capability, not a completed action: nothing
+        # was ordered, no provider was contacted, and no ticket number is invented.
+        assert data["status"] == "escalated"
+        assert data["provider"] == "none"
+        assert data["provider_reference"] is None
+        assert data["confirmed_at"] is None
+        assert "manual review" in (data["replacement_note"] or "")
+        assert "nothing was ordered" in (data["replacement_note"] or "").lower()
 
         rows = await client.get(f"/missions/{mission_id}/order/issues")
         issue = [i for i in rows.json()["issues"] if i["issue_id"] == issue_id][0]
         replacement = issue["replacement"]
-        assert replacement["status"] == "pending"
-        assert replacement["provider"] == "none"
-        assert replacement["provider_reference"] is None
-        assert replacement["confirmed_at"] is None
-        assert "no merchant replacement order exists" in replacement["replacement_note"]
-        # The issue is NOT resolved or requested — it stays under review.
-        assert issue["status"] == "under_review"
+        assert replacement["status"] == "escalated"
+        # The routing is announced on the mission thread (a lifecycle event), and audited.
+        transcript = (
+            await client.get(
+                f"/missions/{mission_id}/agent/conversation", params={"limit": 200}
+            )
+        ).json()["events"]
+        escalated_events = [
+            e
+            for e in transcript
+            if e.get("event_type") == "system_state_change"
+            and (e.get("payload") or {}).get("state") == "resolution_escalated"
+            and (e.get("payload") or {}).get("replacement_id") == replacement["replacement_id"]
+        ]
+        assert len(escalated_events) == 1
+        assert "Nothing was ordered" in escalated_events[0]["content"]
+        async with test_session() as session:
+            audit_rows = list(
+                (
+                    await session.execute(
+                        select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                    )
+                ).scalars()
+            )
+        assert any("routed to manual review" in (a.reason or "") for a in audit_rows)
 
-        # Repeating the call must not multiply records or claim progress.
+        # Repeating the call must not multiply records or re-submit anything: escalated is
+        # terminal and the repeat returns the routed record.
         again = await _replace(client, mission_id, issue_id)
-        assert again.status_code == 503
+        assert again.status_code == 200
+        assert again.json()["status"] == "escalated"
         assert again.json()["replacement_id"] == replacement["replacement_id"]
         assert again.json()["already_existed"] is True
 
@@ -286,6 +313,73 @@ async def test_no_provider_connected_is_explicit_and_unresolved(
                 )
             )
             assert count == 1
+
+
+async def test_escalated_replacement_does_not_block_the_refund_remedy(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
+    refund_api
+):
+    """M4 mutual exclusion: the refund guard refuses only requested/confirmed replacements —
+    an escalated routing leaves the buyer's refund remedy open (#346)."""
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        issue_id = await _authorized_replacement_issue(client, test_session, mission_id)
+        escalated = await _replace(client, mission_id, issue_id)
+        assert escalated.status_code == 200
+        assert escalated.json()["status"] == "escalated"
+
+        # Re-propose a refund with delegated authority, as the workspace flow does after an
+        # escalation, and execute it.
+        from app.models.db_models import ResolutionAssessmentRecord
+
+        async with test_session() as session:
+            row = await session.scalar(
+                select(ResolutionAssessmentRecord).where(
+                    ResolutionAssessmentRecord.issue_id == issue_id
+                )
+            )
+            row.proposed_action = "request_refund"
+            row.authority_decision = "allow"
+            row.requested_amount = Decimal("399.00")
+            await session.commit()
+        await _delegate(test_session, mission_id, ["request_refund", "request_replacement"], refund_limit="500")
+
+        refund_resp = await _refund(client, mission_id, issue_id)
+        assert refund_resp.status_code == 200, refund_resp.text
+        assert refund_resp.json()["status"] == "verified"
+        issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
+        issue = [i for i in issues if i["issue_id"] == issue_id][0]
+        assert issue["refund"]["status"] == "verified"
+        assert issue["replacement"]["status"] == "escalated"
+
+
+async def test_resolve_maps_an_escalated_replacement_to_the_resolution_record(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+):
+    """The orchestrator must consume the escalated executor outcome (200) as a terminal
+    resolution — never as a failure and never by re-running it."""
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        issue_id = await _authorized_replacement_issue(client, test_session, mission_id)
+
+        resolved = await client.post(f"/missions/{mission_id}/order/issues/{issue_id}/resolve")
+        assert resolved.status_code == 200, resolved.text
+        resolution = resolved.json()
+        assert resolution["resolution_state"] == "escalated"
+        assert resolution["executor"] == "replacement"
+        assert resolution["already_existed"] is False
+
+        # A second /resolve returns the persisted outcome and runs nothing new.
+        repeat = await client.post(f"/missions/{mission_id}/order/issues/{issue_id}/resolve")
+        assert repeat.status_code == 200
+        assert repeat.json()["already_existed"] is True
+        assert repeat.json()["resolution_state"] == "escalated"
 
 
 # --------------------------------------------------------------------------- #

@@ -606,6 +606,37 @@ class MockReasoningProvider(ReasoningProvider):
         else:
             action = "request_more_information"
             amount = None
+        # Layer A (sprint M3): the mock is the deterministic judge for hermetic tests, so its
+        # verdicts follow a fixed rule over observable context — a stated preference for one
+        # money remedy means the described issue is the kind both remedies address; without
+        # one it claims nothing and defers to review. The Authority Engine still gates any
+        # execution separately.
+        if preference in ("refund", "replacement"):
+            remedy_eligibility = {
+                "refund": {
+                    "eligibility": "eligible",
+                    "reason": (
+                        "Mock provider: the reported issue as described is the kind a refund "
+                        "addresses. The Authority Engine gates execution separately."
+                    ),
+                },
+                "replacement": {
+                    "eligibility": "eligible",
+                    "reason": (
+                        "Mock provider: the reported issue as described is the kind a "
+                        "replacement addresses. The Authority Engine gates execution separately."
+                    ),
+                },
+            }
+        else:
+            not_reviewed = (
+                "Mock provider: cannot judge eligibility without the buyer's clarified "
+                "description."
+            )
+            remedy_eligibility = {
+                "refund": {"eligibility": "needs_review", "reason": not_reviewed},
+                "replacement": {"eligibility": "needs_review", "reason": not_reviewed},
+            }
         return {
             "issue_assessment": (
                 f"Reported {issue.get('issue_type', 'unspecified')} issue on order "
@@ -619,6 +650,7 @@ class MockReasoningProvider(ReasoningProvider):
             "requested_amount": float(amount) if amount is not None else None,
             "confidence": 1.0,
             "needs_escalation": False,
+            "remedy_eligibility": remedy_eligibility,
         }
 
     async def choose_agent_action(
@@ -1437,8 +1469,19 @@ _RESOLUTION_ASSESSMENT_SYSTEM = (
     '  "reasoning_summary": "<why this action, grounded only in the given context>",\n'
     '  "requested_amount": <number or null — only meaningful for request_refund, and it can never exceed the order amount in the context>,\n'
     '  "confidence": <number between 0 and 1 or null>,\n'
-    '  "needs_escalation": <true or false>\n'
+    '  "needs_escalation": <true or false>,\n'
+    '  "remedy_eligibility": {\n'
+    '    "refund": {"eligibility": "<eligible|ineligible|needs_review>", "reason": "<grounded only in the context>"},\n'
+    '    "replacement": {"eligibility": "<eligible|ineligible|needs_review>", "reason": "<grounded only in the context>"}\n'
+    '  }\n'
     "}\n"
+    "remedy_eligibility is the customer's Layer A view: judge the refund remedy and the "
+    "replacement remedy INDEPENDENTLY of proposed_action and of each other, from the issue "
+    "description, the buyer's answers, and the attached evidence. Mark a remedy eligible only "
+    "when the context supports it; mark it needs_review when the description, answers, or "
+    "evidence are missing or too unclear to judge — never guess. An ineligible verdict must "
+    "cite the concrete fact in the context that disqualifies it. The customer chooses between "
+    "remedies that are eligible; your eligibility verdicts never execute anything.\n"
     "Never invent facts not present in the context. Never output prose, markdown, or any "
     "action outside the six allowed values above."
 )

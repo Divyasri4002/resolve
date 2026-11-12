@@ -1017,17 +1017,17 @@ async def test_two_issues_are_assessed_and_resolved_independently(
         # live Authority Engine re-run at execution time is the single authorization source.
         # Delegating replacement afterwards means the buyer may now choose that remedy, so
         # the executor runs and reports this deployment's honest limitation: no merchant
-        # replacement provider is connected, so the request stays pending, nothing is
-        # claimed, and the resolution mirrors the executor record as pending — NOT denied
-        # (a denial is an authority verdict, and the authority allowed this) and never a
-        # claimed completion.
+        # replacement provider is connected, so the issue is routed to the audited
+        # manual-review escalation (Sprint M4), nothing is submitted, and the resolution
+        # mirrors the executor record as escalated — NOT denied (a denial is an authority
+        # verdict, and the authority allowed this) and never a claimed completion.
         assert (await _delegate(client, mission_id, ["request_replacement"])).status_code == 200
         b_unresolved = await _resolve(client, mission_id, b_id)
-        assert b_unresolved.status_code == 503
-        assert b_unresolved.json()["resolution_state"] == "pending"
+        assert b_unresolved.status_code == 200
+        assert b_unresolved.json()["resolution_state"] == "escalated"
         replacements = await _rows(test_session, ReplacementRecord, mission_id)
         assert len(replacements) == 1
-        assert replacements[0].status == "pending"
+        assert replacements[0].status == "escalated"
         assert replacements[0].error_reason
         # No cross-issue leakage: one refund (A), one resolution record per issue.
         assert len(await _rows(test_session, RefundRecord, mission_id)) == 1

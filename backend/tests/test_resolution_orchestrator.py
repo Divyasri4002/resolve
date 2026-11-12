@@ -116,7 +116,7 @@ async def _setup(restart_env, install_mock_discovery, sample_products, mock_razo
 
 # --------------------------------------------------------------------------- #
 # A + E + K + M: owner allowed, return ALLOW reaches the existing executor, no provider
-# connected stays honestly pending, repeats never duplicate
+# connected routes to the audited manual-review escalation, repeats never duplicate
 # --------------------------------------------------------------------------- #
 async def test_resolve_ownership_and_return_allow_pending(
     restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
@@ -139,26 +139,29 @@ async def test_resolve_ownership_and_return_allow_pending(
         assert await _resolutions(test_session, mission_id) == []
 
         # E + M: ALLOW reaches the return executor; the default provider refuses, so the
-        # orchestrator reports pending + unavailable — never a completion.
+        # orchestrator reports the audited escalated routing — never a completion.
         resp = await _resolve(client, mission_id, issue_id)
-        assert resp.status_code == 503
+        assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "request_return"
         assert data["authority_decision"] == "allow"
         assert data["executor"] == "return"
-        assert data["resolution_state"] == "pending"
+        assert data["resolution_state"] == "escalated"
         assert data["provider"] == "none"
         assert data["provider_attempted"] is False
-        assert "No merchant return provider is connected" in data["detail"]
-        assert "NOT a completed resolution" in data["resolution_note"]
-        assert data["execution"]["status"] == "pending"
+        assert "No merchant return provider is connected" in (
+            data["execution"]["failure_reason"] or ""
+        )
+        assert "routed for human review" in data["resolution_note"]
+        assert data["execution"]["status"] == "escalated"
         assert data["executor_record_id"] == data["execution"]["return_id"]
 
         # K: repeat — same resolution row, same return row, no duplicate execution anywhere.
         again = await _resolve(client, mission_id, issue_id)
-        assert again.status_code == 503
+        assert again.status_code == 200
         second = again.json()
         assert second["resolution_id"] == data["resolution_id"]
+        assert second["resolution_state"] == "escalated"
         assert second["already_existed"] is True
         rows = await _resolutions(test_session, mission_id)
         assert len(rows) == 1

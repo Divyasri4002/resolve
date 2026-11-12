@@ -455,6 +455,23 @@ export default function WorkspacePage() {
     };
   }, [selectedId, syncMission]);
 
+  // Sprint M2: the server advances the demo delivery ladder (packed -> shipped ->
+  // out_for_delivery -> delivered) on order fetches, so polling while the mission sits in
+  // order_confirmed is what brings DELIVERED — and with it the issue tray — within ~2s,
+  // with no user action. Every tick only re-reads server state; the browser writes nothing.
+  useEffect(() => {
+    if (!user || !selected || selected.status !== "order_confirmed") return;
+    const missionId = selected.mission_id;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      if (!cancelled) void syncMission(missionId);
+    }, 600);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [user, selected, syncMission]);
+
   // The conversation the agent actually had (Task CORE-2, Phase 16): reopening a mission reads back
   // what RESOLVE persisted. Fetched once per mission per visit — a turn the user just had is richer
   // than the stored rows, so it is never replaced underneath them.
@@ -978,6 +995,43 @@ export default function WorkspacePage() {
   const handleManualReview = (issueId: string) =>
     runIssueOperation(issueId, "manual-review", "Manual review request");
 
+  // Sprint M3: supplement a `needs_review` remedy with the evidence the assessor asked for,
+  // then re-run the assessment against the same issue row. Only the note and evidence items
+  // travel; the backend gates the supplement on the assessor having marked a remedy
+  // needs_review and appends them to the persisted issue before returning it to `reported`.
+  const handleSupplementIssue = async (
+    issueId: string,
+    note: string,
+    evidence: { kind: string; url?: string | null; description?: string | null }[]
+  ): Promise<boolean> => {
+    if (!selectedId || isIssueBusy) return false;
+    const missionId = selectedId;
+    setIsIssueBusy(true);
+    setIssueError(null);
+    try {
+      await apiRequest<OrderIssue>(`/missions/${missionId}/order/issues/${issueId}/supplement`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: note || null, evidence }),
+      });
+      await finishStep(missionId, "Evidence supplemented", null);
+      // The supplement returns the issue to `reported`; assess re-evaluates the SAME
+      // assessment row against the fuller record.
+      const reassessed = await apiRequest<OperationReply>(
+        `/missions/${missionId}/order/issues/${issueId}/assess`,
+        { method: "POST" }
+      );
+      await finishStep(missionId, "Re-assessment recorded", reassessed.agent_message);
+      return true;
+    } catch (err) {
+      setIssueError(messageOf(err));
+      await finishStep(missionId, "Evidence supplement or re-assessment refused", null);
+      return false;
+    } finally {
+      setIsIssueBusy(false);
+    }
+  };
+
   if (isAuthLoading || !user) {
     return (
       <div className="flex h-dvh items-center justify-center bg-surface">
@@ -1348,6 +1402,7 @@ export default function WorkspacePage() {
                     onReturn={handleExecuteReturn}
                     onResolve={handleResolveIssue}
                     onManualReview={handleManualReview}
+                    onSupplement={handleSupplementIssue}
                   />
                 )}
             </div>

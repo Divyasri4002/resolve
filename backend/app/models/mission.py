@@ -158,14 +158,21 @@ class ReplacementStatus(StrEnum):
                 this is NOT shipment or delivery
     confirmed : the provider itself later confirmed the replacement
     failed    : the provider reported failure; a retry goes through the same record
+    escalated : routed to manual review / operator escalation because no automated replacement
+                provider is connected. Nothing was ordered from any merchant, no provider was
+                contacted, and no ticket number is invented — a human taking the case is the
+                only thing this state claims.
 
     Only a provider response may move a record past `pending` — never an endpoint call.
+    The one exception is `escalated`, which is not a step toward fulfilment at all: it is
+    the terminal human-routing outcome of having no provider.
     """
 
     PENDING = "pending"
     REQUESTED = "requested"
     CONFIRMED = "confirmed"
     FAILED = "failed"
+    ESCALATED = "escalated"
 
 
 class ReturnStatus(StrEnum):
@@ -186,6 +193,8 @@ class ReturnStatus(StrEnum):
                       reconciliation may move a record out of this state — never a re-submission.
 
     Only a provider response may move a record past `pending` — never an endpoint call.
+    The one exception is `escalated`, which is not a step toward fulfilment at all: it is
+    the terminal human-routing outcome of having no provider.
     """
 
     PENDING = "pending"
@@ -193,6 +202,7 @@ class ReturnStatus(StrEnum):
     CONFIRMED = "confirmed"
     FAILED = "failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
+    ESCALATED = "escalated"
 
 
 class PurchaseAuthorizationStatus(StrEnum):
@@ -468,6 +478,12 @@ class ResolutionProposal(BaseModel):
     currency: str | None = None
     confidence: float | None = None
     needs_escalation: bool = False
+    # Layer A (buildathon sprint): the assessor's independent eligibility verdict per money
+    # remedy, so the buyer can choose between them instead of inheriting one proposal.
+    # Shape: {"refund": {"eligibility": <eligible|ineligible|needs_review>, "reason": str},
+    #         "replacement": {...}}. None means the assessor never produced verdicts (legacy
+    # row) — the client must show "not evaluated", never infer eligibility.
+    remedy_eligibility: dict[str, dict[str, str | None]] | None = None
     source: str = Field(
         default="reasoning_model",
         description="'reasoning_model' | 'safe_fallback' — how this validated proposal "

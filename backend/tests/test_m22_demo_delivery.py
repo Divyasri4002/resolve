@@ -10,7 +10,9 @@ afterwards.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
+from datetime import timedelta
 
 from sqlalchemy import select
 
@@ -21,6 +23,7 @@ from app.models.db_models import (
     PurchaseAuthorizationRecord,
     ResolveOrderRecord,
 )
+from app.routers import missions as missions_router
 
 from tests.test_core3a_golden_lifecycle import (
     _audit,
@@ -38,8 +41,15 @@ DAMAGED = {
 }
 
 
-def _flag_on(monkeypatch) -> None:
+def _flag_on_gated(monkeypatch, gate: float) -> None:
     monkeypatch.setattr(get_settings(), "shopping_demo_delivery_enabled", True)
+    monkeypatch.setattr(missions_router, "_DEMO_DELIVERY_STAGE_SECONDS", gate)
+
+
+def _flag_on(monkeypatch) -> None:
+    # Sprint M2: gate 0 collapses the staged ladder into the first fetch, keeping these
+    # single-fetch assertions exact. The staged timing itself is proven in test_S* below.
+    _flag_on_gated(monkeypatch, 0)
 
 
 async def _order_row(test_session, mission_id) -> ResolveOrderRecord:
@@ -342,3 +352,127 @@ async def test_H_delivered_order_is_not_purchase_eligible(
                 ).scalars()
             )
         assert claims == []
+
+
+# --------------------------------------------------------------------------- #
+# S1. The staged ladder advances one gate window per fetch, deterministically.
+# --------------------------------------------------------------------------- #
+async def test_S1_staged_ladder_advances_one_window_per_fetch_and_catches_up(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, monkeypatch
+):
+    """PACKED -> SHIPPED -> OUT FOR DELIVERY -> DELIVERED, one stage at a time.
+
+    A one-hour stage gate makes every fetch deterministic: no wall-clock sleep decides the
+    outcome — the test rewinds the persisted stage timestamp instead, which is precisely the
+    catch-up window the ladder exists for. Each overdue stage is persisted with its scheduled
+    timestamp (previous stage + one gate), so a long gap is caught up, never skipped."""
+    make_client, test_session = restart_env
+    client = make_client()
+    _flag_on_gated(monkeypatch, 3600.0)
+    async with client:
+        mission_id = await _paid_confirmed_mission(
+            client, install_mock_discovery, sample_products, "deliverS1@m22p3.test"
+        )
+
+        # First fetch past confirmation: the simulation starts at 'packed'; the order itself
+        # has not delivered and the mission has not moved.
+        first = await client.get(f"/missions/{mission_id}/order")
+        assert first.status_code == 200, first.text
+        body = first.json()
+        assert body["status"] == "order_confirmed"
+        assert body["delivery_stage"] == "packed"
+        assert body["delivered_at"] is None and body["delivery_mode"] is None
+        mission = await _mission_row(test_session, mission_id)
+        assert mission.status == "order_confirmed"
+        grouped = await _audit(test_session, mission_id)
+        assert len(grouped.get("order_delivery_stage", [])) == 1
+        assert grouped["order_delivery_stage"][0]["actor"] == "system"
+        assert "order_delivered" not in grouped
+
+        async def _rewind_stage(seconds: float):
+            async with test_session() as session:
+                order = await session.scalar(
+                    select(ResolveOrderRecord).where(
+                        ResolveOrderRecord.mission_id == mission_id
+                    )
+                )
+                scheduled = order.delivery_stage_at - timedelta(seconds=seconds)
+                order.delivery_stage_at = scheduled
+                await session.commit()
+            return scheduled
+
+        # One gate overdue: exactly one stage advances, with its scheduled timestamp.
+        shipped_due = await _rewind_stage(3600.0)
+        second = await client.get(f"/missions/{mission_id}/order")
+        body = second.json()
+        assert body["status"] == "order_confirmed"
+        assert body["delivery_stage"] == "shipped"
+        assert body["delivered_at"] is None
+        assert body["delivery_stage_at"] == (shipped_due + timedelta(seconds=3600)).isoformat()
+
+        out_due = await _rewind_stage(3600.0)
+        third = await client.get(f"/missions/{mission_id}/order")
+        body = third.json()
+        assert body["status"] == "order_confirmed"
+        assert body["delivery_stage"] == "out_for_delivery"
+        assert body["delivered_at"] is None
+
+        delivered_due = await _rewind_stage(3600.0)
+        final = await client.get(f"/missions/{mission_id}/order")
+        body = final.json()
+        assert body["status"] == "delivered"
+        assert body["delivery_stage"] == "delivered"
+        assert body["delivery_mode"] == "demo_simulated"
+        assert body["delivered_at"] == (delivered_due + timedelta(seconds=3600)).isoformat()
+
+        # The ladder left complete evidence: three simulated stages plus the delivery, every
+        # one a system actor, none skipped.
+        mission = await _mission_row(test_session, mission_id)
+        assert mission.status == "delivered"
+        assert mission.shopping_intent["state"] == "delivered"
+        grouped = await _audit(test_session, mission_id)
+        assert len(grouped.get("order_delivery_stage", [])) == 3
+        assert len(grouped.get("order_delivered", [])) == 1
+        assert grouped["order_delivered"][0]["actor"] == "system"
+
+
+# --------------------------------------------------------------------------- #
+# S2. The real elapsed-time path: one reload after the ladder window delivers,
+#     and the catch-up persists every overdue stage.
+# --------------------------------------------------------------------------- #
+async def test_S2_wall_clock_cadence_delivers_with_every_stage_persisted(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, monkeypatch
+):
+    """The production gate is 0.5s per stage; at 0.05s the ladder completes far inside the
+    demo budget. One reload after the whole window finds the order delivered with all three
+    simulated stages persisted — the catch-up never skips a stage silently."""
+    make_client, test_session = restart_env
+    client = make_client()
+    _flag_on_gated(monkeypatch, 0.05)
+    async with client:
+        mission_id = await _paid_confirmed_mission(
+            client, install_mock_discovery, sample_products, "deliverS2@m22p3.test"
+        )
+        started = await client.get(f"/missions/{mission_id}/order")
+        assert started.status_code == 200, started.text
+        assert started.json()["status"] == "order_confirmed"
+        assert started.json()["delivery_stage"] == "packed"
+
+        # Three stages x 0.05s gate = 0.15s; the sleep is deliberately far past the window.
+        await asyncio.sleep(0.3)
+
+        after = await client.get(f"/missions/{mission_id}/order")
+        body = after.json()
+        assert body["status"] == "delivered"
+        assert body["delivery_stage"] == "delivered"
+        assert body["delivery_mode"] == "demo_simulated"
+        assert body["delivered_at"]
+
+        grouped = await _audit(test_session, mission_id)
+        stages = grouped.get("order_delivery_stage", [])
+        assert len(stages) == 3
+        assert all(entry["actor"] == "system" for entry in stages)
+        reasons = [entry["reason"] for entry in stages]
+        for stage in ("packed", "shipped", "out_for_delivery"):
+            assert any(f"stage '{stage}' simulated" in reason for reason in reasons)
+        assert len(grouped.get("order_delivered", [])) == 1

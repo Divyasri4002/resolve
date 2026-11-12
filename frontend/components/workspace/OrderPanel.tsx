@@ -22,6 +22,77 @@ const MERCHANT_ORDER_COPY: Record<string, string> = {
   unlinked: "No merchant order pairing on record",
 };
 
+// Sprint M2: the server advances this ladder on order fetches (delivery_mode=demo_simulated).
+// The stage lives on the order row; "delivered" can also arrive directly when the whole ladder
+// collapses into one fetch.
+const DELIVERY_STAGES = ["packed", "shipped", "out_for_delivery", "delivered"] as const;
+
+function DeliveryStageStrip({ order }: { order: ResolveOrder }) {
+  const current =
+    order.status === "delivered" ? "delivered" : (order.delivery_stage ?? null);
+  // Unknown stage strings land at -1 and render as "not being simulated" — never as progress.
+  const currentIndex = current
+    ? (DELIVERY_STAGES as readonly string[]).indexOf(current)
+    : -1;
+
+  return (
+    <div className="mt-3.5 rounded-xl bg-neutral-sand/20 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-text-charcoal/50">
+          Delivery (demo simulated)
+        </p>
+        {order.status === "delivered" && order.delivered_at && (
+          <span className="text-[10px] text-text-charcoal/45">
+            {new Date(order.delivered_at).toLocaleString()}
+          </span>
+        )}
+      </div>
+      {currentIndex >= 0 ? (
+        <div className="mt-2 flex items-center gap-1">
+          {DELIVERY_STAGES.map((stage, i) => {
+            const reached = i <= currentIndex;
+            const isCurrent = i === currentIndex;
+            return (
+              <div key={stage} className="flex min-w-0 flex-1 items-center gap-1">
+                <span
+                  className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${
+                    isCurrent
+                      ? "bg-status-info-soft text-status-info"
+                      : reached
+                        ? "bg-status-success-soft text-status-success"
+                        : "border border-text-charcoal/10 bg-surface text-text-charcoal/40"
+                  }`}
+                >
+                  {isCurrent && i < DELIVERY_STAGES.length - 1 && (
+                    <Loader2 size={10} className="shrink-0 animate-spin" />
+                  )}
+                  {stage.replace(/_/g, " ")}
+                </span>
+                {i < DELIVERY_STAGES.length - 1 && (
+                  <span
+                    className={`h-px w-3 shrink-0 ${
+                      i < currentIndex ? "bg-status-success/40" : "bg-text-charcoal/10"
+                    }`}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-1.5 text-[11px] text-text-charcoal/55">
+          {order.status === "order_created"
+            ? "Delivery simulation begins once the order record is confirmed."
+            : "This order's delivery is not being simulated right now — no delivery state is claimed."}
+        </p>
+      )}
+      <p className="mt-1.5 text-[10px] text-text-charcoal/45">
+        Stages advance server-side on order fetches. No carrier or merchant shipment is claimed.
+      </p>
+    </div>
+  );
+}
+
 interface OrderPanelProps {
   /** Persisted RESOLVE order record, if one has been created. */
   order: ResolveOrder | null;
@@ -114,6 +185,9 @@ export function OrderPanel({
               </p>
             </div>
           </div>
+
+          {/* Sprint M2: server-advanced demo delivery stage, rendered only from the row */}
+          <DeliveryStageStrip order={order} />
 
           {/* Canonical order detail — every value came from the server */}
           <div className="mt-3.5 space-y-2 rounded-xl bg-neutral-sand/20 p-4 text-sm">

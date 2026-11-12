@@ -427,14 +427,15 @@ async def test_golden_safety_scenario_proposal_deny_delegate_allow_pending_retry
         assert delegated.status_code == 200, delegated.text
         assert delegated.json()["authority"]["allowed_actions"] == ["request_replacement"]
 
-        # ALLOW + EXECUTION ATTEMPT + PROVIDER FAILURE -> PENDING. The same agent identity
-        # re-runs the ladder: the stored proposal is re-gated fresh, now it passes, the
-        # controlled executor runs, and the unconnected provider refuses.
+        # ALLOW + EXECUTION ATTEMPT + NO PROVIDER CONNECTED -> ESCALATED. The same agent
+        # identity re-runs the ladder: the stored proposal is re-gated fresh, now it passes,
+        # the controlled executor runs, and the unconnected provider routes the issue to the
+        # audited manual-review escalation (Sprint M4) — never a bare failure, never a claim.
         turn2 = await _agent(client, mission_id, "Yes — please go ahead with the replacement.")
         called2 = _tools(turn2)
         assert "assess_issue" in called2 and "resolve_issue" in called2
         assert turn2["authority_decision"]["approved"] is True
-        assert turn2["authority_decision"]["resolution_state"] == "pending"
+        assert turn2["authority_decision"]["resolution_state"] == "escalated"
 
         rows = await _resolutions(test_session, mission_id)
         assert len(rows) == 1  # the deny and the allow are ONE row, updated in place
@@ -443,7 +444,7 @@ async def test_golden_safety_scenario_proposal_deny_delegate_allow_pending_retry
         assert row.action == "request_replacement"
         assert row.authority_decision == "allow"
         assert row.executor == "replacement"
-        assert row.resolution_state == "pending"
+        assert row.resolution_state == "escalated"
         assert row.provider == "none"
         assert row.provider_reference is None
         assert row.provider_attempted is False
@@ -453,18 +454,18 @@ async def test_golden_safety_scenario_proposal_deny_delegate_allow_pending_retry
                 (await session.execute(select(ReplacementRecord))).scalars().all()
             )
         assert len(replacement) == 1
-        assert replacement[0].status == "pending"
+        assert replacement[0].status == "escalated"
         assert replacement[0].provider == "none"
         assert replacement[0].provider_reference is None
         assert replacement[0].confirmed_at is None
 
-        # SAFE RETRY — the same request again: the same pending record, no second execution.
+        # SAFE REPEAT — the same request again: the same escalated record, no second execution.
         retry = await _resolve(client, mission_id, issue_id)
-        assert retry.status_code == 503, retry.text
+        assert retry.status_code == 200, retry.text
         retried = retry.json()
         assert retried["already_existed"] is True
         assert retried["resolution_id"] == row.resolution_id
-        assert retried["resolution_state"] == "pending"
+        assert retried["resolution_state"] == "escalated"
         assert retried["provider_attempted"] is False
         for field in DECISION_TRACE_FIELDS:
             assert field in retried, field

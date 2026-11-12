@@ -6,8 +6,8 @@ Pipeline under test:
     -> return executor -> ReturnProvider -> persisted state.
 
 Two facts kept honest by this suite:
-  * No merchant return provider exists in this project, so the default provider refuses
-    explicitly. The executor must record intent + 'pending' + HTTP 503 and never claim a return.
+  * No merchant return provider exists in this project, so with the default provider the executor
+    routes the return to an audited manual-review escalation and never claims a return.
   * A test-only fake stands in for a future real one, installed through the same seam production
     uses; it cannot be selected by configuration.
 """
@@ -258,9 +258,10 @@ def test_return_authority_grants_neither_refund_nor_replacement(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# C, G: no provider connected -> explicit, pending, idempotent, no false claim
+# C, G: no provider connected -> audited manual-review escalation, idempotent,
+#       no false claim (Sprint M4: the honest terminal outcome, not a 503)
 # --------------------------------------------------------------------------- #
-async def test_no_provider_connected_stays_pending_and_unresolved(
+async def test_no_provider_connected_routes_to_manual_review_escalation(
     restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning,
     recorded_events,
 ):
@@ -272,26 +273,59 @@ async def test_no_provider_connected_stays_pending_and_unresolved(
         issue_id = await _authorized_return_issue(client, test_session, mission_id)
 
         resp = await _ret(client, mission_id, issue_id)
-        assert resp.status_code == 503
+        assert resp.status_code == 200
         data = resp.json()
-        assert "No merchant return provider is connected" in data["detail"]
-        assert data["status"] == "pending"
+        assert data["status"] == "escalated"
         assert data["provider"] == "none"
         assert data["provider_reference"] is None
         assert data["requested_at"] is None and data["confirmed_at"] is None
-        assert "no merchant return exists" in data["return_note"]
+        assert "manual review" in data["return_note"]
+        assert "nothing was submitted" in data["return_note"].lower()
+        assert "no merchant return provider is connected" in (data["failure_reason"] or "").lower()
 
         issue = [
             i for i in (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
             if i["issue_id"] == issue_id
         ][0]
-        assert issue["status"] == "under_review"  # never advanced without a provider
+        assert issue["status"] == "under_review"  # escalation routes it to a human, not onward
         assert issue["return"]["return_id"] == data["return_id"]
+        assert issue["return"]["status"] == "escalated"
 
-        # G: a repeat reuses the same row and claims nothing new.
+        # The escalation is announced on the mission thread as a persisted lifecycle event.
+        events = (
+            await client.get(
+                f"/missions/{mission_id}/agent/conversation", params={"limit": 200}
+            )
+        ).json()["events"]
+        escalated_events = [
+            e
+            for e in events
+            if e["event_type"] == "system_state_change"
+            and (e["payload"] or {}).get("state") == "resolution_escalated"
+            and (e["payload"] or {}).get("return_id") == data["return_id"]
+        ]
+        assert len(escalated_events) == 1
+        assert "Nothing was submitted" in escalated_events[0]["content"]
+
+        # ...and audited: the note lands in the reason alongside the Engine's own decision.
+        async with test_session() as session:
+            audits = (
+                await session.scalars(
+                    select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                )
+            ).all()
+        escalated_audits = [
+            a for a in audits if "routed to manual review" in (a.reason or "")
+        ]
+        assert escalated_audits, "the escalation must be audited"
+        assert "no provider connected" in escalated_audits[-1].reason
+        assert escalated_audits[-1].action == "request_return"
+
+        # G: a repeat reuses the same row and routes nothing new.
         again = await _ret(client, mission_id, issue_id)
-        assert again.status_code == 503
+        assert again.status_code == 200
         assert again.json()["return_id"] == data["return_id"]
+        assert again.json()["status"] == "escalated"
         assert again.json()["already_existed"] is True
         async with test_session() as session:
             count = await session.scalar(
@@ -300,9 +334,18 @@ async def test_no_provider_connected_stays_pending_and_unresolved(
                 )
             )
             assert count == 1
-    assert [e["event"] for e in recorded_events if e["event"].startswith("return_")] == [
-        "return_pending"
+
+    # The broadcast stream carries exactly one escalation frame — the same persisted row,
+    # in the canonical envelope (no ad-hoc return_pending vocabulary).
+    escalated_frames = [
+        e
+        for e in recorded_events
+        if e["event_type"] == "system_state_change"
+        and (e["payload"] or {}).get("state") == "resolution_escalated"
     ]
+    assert len(escalated_frames) == 1
+    assert escalated_frames[0]["payload"]["return_id"] == data["return_id"]
+    assert "Nothing was submitted" in escalated_frames[0]["content"]
 
 
 # --------------------------------------------------------------------------- #
@@ -680,8 +723,11 @@ async def test_pending_replacement_does_not_block_return(
             )
             await session.commit()
         resp = await _ret(client, mission_id, issue_id)
-        assert resp.status_code == 503  # reaches the provider boundary, unblocked
-        assert resp.json()["status"] == "pending"
+        # M4: the real default provider is unconnected, so the attempt routes to the audited
+        # manual-review escalation — but only AFTER it cleared the replacement guard, which is
+        # what this test exists to prove.
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "escalated"
 
 
 async def test_returned_issue_blocks_refund_and_replacement(

@@ -142,6 +142,13 @@ export interface ResolveOrder {
    */
   delivered_at?: string | null;
   delivery_mode?: string | null;
+  /**
+   * Sprint M2: where the simulated fulfillment ladder stands — "packed" | "shipped" |
+   * "out_for_delivery" | "delivered" — with the time its current stage was stamped. Null
+   * until the first order fetch past confirmation; every value is server-persisted.
+   */
+  delivery_stage?: string | null;
+  delivery_stage_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   test_mode?: boolean;
@@ -173,6 +180,15 @@ export interface ResolutionAssessment {
   needs_escalation: boolean;
   /** "reasoning_model" | "safe_fallback" */
   proposal_source: string;
+  /**
+   * Sprint M3 Layer A: the assessor's independent per-remedy eligibility verdicts. Null means
+   * the assessor never produced verdicts (legacy or fallback row) — the client must show
+   * "not evaluated", never infer eligibility.
+   */
+  remedy_eligibility?: {
+    refund?: { eligibility: string; reason?: string | null } | null;
+    replacement?: { eligibility: string; reason?: string | null } | null;
+  } | null;
   /** Gate outcome only: "allow" means passed the Authority Engine, NOT executed. */
   authority_decision: "allow" | "deny" | "escalate" | string;
   decision_reason: string;
@@ -226,9 +242,10 @@ export interface ReplacementRecord {
   provider_outcome?: string | null;
   /**
    * 'pending' means RESOLVE recorded the intent and NO merchant replacement exists — with no
-   * provider connected (the current reality) this is where it stays.
+   * provider connected (the current reality) this is where it stays. 'escalated' (sprint M4)
+   * is the terminal manual-review routing when no automated provider is connected at all.
    */
-  status: "pending" | "requested" | "confirmed" | "failed" | string;
+  status: "pending" | "requested" | "confirmed" | "failed" | "escalated" | string;
   error_reason?: string | null;
   confirmed_at?: string | null;
   created_at?: string | null;
@@ -254,9 +271,10 @@ export interface ReturnRecord {
   provider_outcome?: string | null;
   /**
    * 'pending' means RESOLVE recorded the intent and NO merchant return exists — with no provider
-   * connected (the current reality) this is where it stays.
+   * connected (the current reality) this is where it stays. 'escalated' (sprint M4) is the
+   * terminal manual-review routing when no automated provider is connected at all.
    */
-  status: "pending" | "requested" | "confirmed" | "failed" | string;
+  status: "pending" | "requested" | "confirmed" | "failed" | "escalated" | string;
   failure_reason?: string | null;
   requested_at?: string | null;
   confirmed_at?: string | null;

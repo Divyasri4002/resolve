@@ -1365,6 +1365,14 @@ def _fulfillment_note(order: ResolveOrderRecord) -> str:
 
 DEMO_DELIVERY_MODE = "demo_simulated"
 
+# Sprint M2: the simulated fulfillment ladder between order confirmation and delivery.
+# Each stage is gated on real elapsed time (default 0.5s) so the workspace's order poll
+# shows packed -> shipped -> out_for_delivery -> delivered over roughly two seconds
+# instead of one instant jump. A gate of 0 collapses the whole ladder into the first
+# fetch, preserving the single-shot delivered-on-reload behavior the M22 §1 tests assert.
+_DEMO_DELIVERY_LADDER = ("packed", "shipped", "out_for_delivery")
+_DEMO_DELIVERY_STAGE_SECONDS = 0.5
+
 
 def _order_response(order: ResolveOrderRecord, agent_message: str | None = None) -> dict:
     """Canonical client-facing order payload — every value read from the persisted row."""
@@ -1383,6 +1391,12 @@ def _order_response(order: ResolveOrderRecord, agent_message: str | None = None)
         "razorpay_payment_id": order.razorpay_payment_id,
         "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
         "delivery_mode": order.delivery_mode,
+        # Sprint M2: where the simulated fulfillment ladder stands, with the time its
+        # current stage was stamped. Null until the first order fetch past confirmation.
+        "delivery_stage": order.delivery_stage,
+        "delivery_stage_at": (
+            order.delivery_stage_at.isoformat() if order.delivery_stage_at else None
+        ),
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         # Derived from the persisted linkage column, and nothing else. The merchant-side order id
@@ -1428,29 +1442,34 @@ async def get_resolve_order(
         settings.shopping_demo_delivery_enabled
         and order.status == MissionStatus.ORDER_CONFIRMED.value
     ):
-        order = await _persist_demo_delivery(record, order, db)
+        order = await _advance_demo_delivery(record, order, db)
     return _order_response(order)
 
 
-async def _persist_demo_delivery(
+async def _advance_demo_delivery(
     record: MissionRecord, order: ResolveOrderRecord, db: AsyncSession
 ) -> ResolveOrderRecord:
     """
-    The demo-environment delivery transition (M22 §1): a customer's reload of a confirmed order
-    persists `delivered`. Guards, in order — an unverified/unpaid order never changes status, and
-    an order on the merchant path is never demo-delivered:
+    The demo-environment fulfillment ladder (M22 §1, sprint M2): a customer's order fetch
+    advances the simulated shipment stage by stage — packed -> shipped -> out_for_delivery
+    -> delivered — each stage gated on real elapsed time so the workspace's order poll shows
+    the progression over roughly two seconds. Guards, in order — an unverified/unpaid order
+    never advances, and an order on the merchant path is never demo-delivered:
 
-      - the persisted payment must still be verified against this order's OWN Razorpay references
-        (the same pairing proof the purchase gate uses);
-      - no merchant-purchase authorization claim may exist for the order, whatever its status —
-        any claim means the merchant channel owns this order's outcome, and a simulated delivery
-        must never race or overwrite a real pairing.
+      - the persisted payment must still be verified against this order's OWN Razorpay
+        references (the same pairing proof the purchase gate uses);
+      - no merchant-purchase authorization claim may exist for the order, whatever its
+        status — any claim means the merchant channel owns this order's outcome, and a
+        simulated delivery must never race or overwrite a real pairing.
 
-    The write itself is a conditional UPDATE gated on the row still being order_confirmed, so two
-    concurrent reloads persist exactly one transition, one audit event and one lifecycle event;
-    the loser re-reads the winner's committed row. The mode label travels with the row forever,
-    and the delivery state stays out of the conversational lifecycle ladder (lifecycle.py), so
-    only this endpoint can ever produce it.
+    Every stage write is a conditional UPDATE gated on the row still being order_confirmed
+    and still showing the expected previous stage, so two concurrent fetches cannot
+    double-advance a stage; the loser re-reads the winner's committed row and appends
+    nothing. Only the final delivered transition is a conversational lifecycle event —
+    the intermediate stages stay out of the lifecycle ladder (lifecycle.py) and exist
+    only as order-row facts plus audit events, so only this endpoint can ever produce
+    them. After a long gap the ladder catches up: every overdue stage is persisted with
+    its own scheduled timestamp, never skipped silently.
     """
     intent_data = dict(record.shopping_intent or {})
     payment = intent_data.get("payment") or {}
@@ -1464,56 +1483,155 @@ async def _persist_demo_delivery(
         return order
 
     now = datetime.utcnow()
-    result = await db.execute(
-        update(ResolveOrderRecord)
-        .where(
-            ResolveOrderRecord.mission_id == order.mission_id,
-            ResolveOrderRecord.status == MissionStatus.ORDER_CONFIRMED.value,
+
+    if order.delivery_stage is None:
+        # First fetch past confirmation: the simulated shipment starts.
+        result = await db.execute(
+            update(ResolveOrderRecord)
+            .where(
+                ResolveOrderRecord.mission_id == order.mission_id,
+                ResolveOrderRecord.status == MissionStatus.ORDER_CONFIRMED.value,
+                ResolveOrderRecord.delivery_stage.is_(None),
+            )
+            .values(
+                delivery_stage=_DEMO_DELIVERY_LADDER[0],
+                delivery_stage_at=now,
+                updated_at=now,
+            )
         )
-        .values(
-            status=MissionStatus.DELIVERED.value,
-            delivered_at=now,
-            delivery_mode=DEMO_DELIVERY_MODE,
-            updated_at=now,
+        if result.rowcount != 1:
+            await db.rollback()
+            await db.refresh(order)
+            return order
+        order.delivery_stage = _DEMO_DELIVERY_LADDER[0]
+        order.delivery_stage_at = now
+        await audit.append_event(
+            db,
+            mission_id=order.mission_id,
+            actor="system",
+            action="order_delivery_stage",
+            recorded=True,
+            reason=(
+                f"Demo-environment fulfillment stage 'packed' simulated for RESOLVE order "
+                f"{order.order_id} (delivery_mode={DEMO_DELIVERY_MODE}); RESOLVE's own "
+                "simulated transition, not a carrier or merchant event"
+            ),
         )
-    )
-    if result.rowcount != 1:
-        # A concurrent reload won the transition. Discard this transaction's failed UPDATE and
-        # re-read the winner's committed row; append nothing.
+
+    try:
+        current_index = _DEMO_DELIVERY_LADDER.index(order.delivery_stage)
+    except ValueError:
+        # An unknown persisted stage is never advanced from — the row stands as stored.
         await db.rollback()
         await db.refresh(order)
         return order
 
-    await db.refresh(order)
-    intent_data["state"] = MissionStatus.DELIVERED.value
-    record.shopping_intent = intent_data
-    record.status = MissionStatus.DELIVERED.value
-    await audit.append_event(
-        db,
-        mission_id=order.mission_id,
-        actor="system",
-        action="order_delivered",
-        recorded=True,
-        reason=(
-            f"Demo-environment delivery persisted for RESOLVE order {order.order_id} on the "
-            f"customer's reload (delivery_mode={DEMO_DELIVERY_MODE}); RESOLVE's own simulated "
-            "transition, not a carrier or merchant confirmation"
-        ),
-    )
-    delivered_row = await append_lifecycle_event(
-        db,
-        mission_id=order.mission_id,
-        user_id=record.user_id,
-        state=MissionStatus.DELIVERED.value,
-        detail=f"Order {order.order_id} delivered (demo simulated).",
-        extra_payload={
-            "status": MissionStatus.DELIVERED.value,
-            "order_id": order.order_id,
-            "delivery_mode": DEMO_DELIVERY_MODE,
-        },
-    )
+    stage_at = order.delivery_stage_at or now
+    remaining = len(_DEMO_DELIVERY_LADDER) - current_index
+    if _DEMO_DELIVERY_STAGE_SECONDS <= 0:
+        advances_due = remaining
+    else:
+        advances_due = int((now - stage_at).total_seconds() // _DEMO_DELIVERY_STAGE_SECONDS)
+    advances_due = max(0, min(advances_due, remaining))
+    if advances_due < 1:
+        await db.commit()
+        await db.refresh(order)
+        return order
+
+    for advance in range(1, advances_due + 1):
+        stage_time = stage_at + timedelta(seconds=advance * _DEMO_DELIVERY_STAGE_SECONDS)
+        from_stage = order.delivery_stage
+        to_index = current_index + advance
+        if to_index < len(_DEMO_DELIVERY_LADDER):
+            to_stage = _DEMO_DELIVERY_LADDER[to_index]
+            result = await db.execute(
+                update(ResolveOrderRecord)
+                .where(
+                    ResolveOrderRecord.mission_id == order.mission_id,
+                    ResolveOrderRecord.status == MissionStatus.ORDER_CONFIRMED.value,
+                    ResolveOrderRecord.delivery_stage == from_stage,
+                )
+                .values(delivery_stage=to_stage, delivery_stage_at=stage_time, updated_at=now)
+            )
+            if result.rowcount != 1:
+                await db.rollback()
+                await db.refresh(order)
+                return order
+            await audit.append_event(
+                db,
+                mission_id=order.mission_id,
+                actor="system",
+                action="order_delivery_stage",
+                recorded=True,
+                reason=(
+                    f"Demo-environment fulfillment stage '{to_stage}' simulated for RESOLVE "
+                    f"order {order.order_id} (delivery_mode={DEMO_DELIVERY_MODE}); RESOLVE's "
+                    "own simulated transition, not a carrier or merchant event"
+                ),
+            )
+            order.delivery_stage = to_stage
+            order.delivery_stage_at = stage_time
+            continue
+
+        # The ladder's end: the M22 §1 delivered transition, stamped when the simulation
+        # schedules it — the honest "when the shipment arrived", even after a catch-up gap.
+        result = await db.execute(
+            update(ResolveOrderRecord)
+            .where(
+                ResolveOrderRecord.mission_id == order.mission_id,
+                ResolveOrderRecord.status == MissionStatus.ORDER_CONFIRMED.value,
+                ResolveOrderRecord.delivery_stage == from_stage,
+            )
+            .values(
+                status=MissionStatus.DELIVERED.value,
+                delivered_at=stage_time,
+                delivery_mode=DEMO_DELIVERY_MODE,
+                delivery_stage="delivered",
+                delivery_stage_at=stage_time,
+                updated_at=now,
+            )
+        )
+        if result.rowcount != 1:
+            # A concurrent fetch won this or an earlier transition. Discard this
+            # transaction's failed UPDATE and re-read the winner's committed row.
+            await db.rollback()
+            await db.refresh(order)
+            return order
+
+        await db.refresh(order)
+        intent_data["state"] = MissionStatus.DELIVERED.value
+        record.shopping_intent = intent_data
+        record.status = MissionStatus.DELIVERED.value
+        await audit.append_event(
+            db,
+            mission_id=order.mission_id,
+            actor="system",
+            action="order_delivered",
+            recorded=True,
+            reason=(
+                f"Demo-environment delivery persisted for RESOLVE order {order.order_id} on the "
+                f"customer's order fetch (delivery_mode={DEMO_DELIVERY_MODE}); RESOLVE's own "
+                "simulated transition, not a carrier or merchant confirmation"
+            ),
+        )
+        delivered_row = await append_lifecycle_event(
+            db,
+            mission_id=order.mission_id,
+            user_id=record.user_id,
+            state=MissionStatus.DELIVERED.value,
+            detail=f"Order {order.order_id} delivered (demo simulated).",
+            extra_payload={
+                "status": MissionStatus.DELIVERED.value,
+                "order_id": order.order_id,
+                "delivery_mode": DEMO_DELIVERY_MODE,
+            },
+        )
+        await db.commit()
+        await broadcast_event_row(delivered_row)
+        return order
+
     await db.commit()
-    await broadcast_event_row(delivered_row)
+    await db.refresh(order)
     return order
 
 
@@ -2674,6 +2792,97 @@ async def submit_issue_answers(
     return _issue_questions_response(issue)
 
 
+class SupplementIssueEvidenceRequest(BaseModel):
+    """The buyer's supplemented evidence for a remedy the assessor marked `needs_review`."""
+
+    note: str | None = None
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+
+
+@router.post("/{mission_id}/order/issues/{issue_id}/supplement", response_model=dict)
+async def supplement_issue_evidence(
+    mission_id: str,
+    issue_id: str,
+    body: SupplementIssueEvidenceRequest,
+    current_user: UserRecord | None = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Record the buyer's supplemented evidence on an issue whose assessment asked for more.
+
+    Sprint M3's Layer A loop: when the assessor marked a remedy `needs_review`, the
+    workspace prompts for what was missing (a photo, a clearer description). This endpoint
+    accepts exactly that — a bounded note and/or evidence items — appends them to the issue
+    record, and returns the issue to `reported` so the next /assess call re-evaluates the
+    SAME assessment row against the fuller record. It changes nothing else: no verdict, no
+    authority value, no execution of anything. The assessment's old verdict is never
+    presented again as if it had seen the supplement.
+    """
+    record = await _load_mission_for_shopping_action(mission_id, current_user, db)
+    order = await _load_order(db, mission_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="No order exists for this mission")
+    issue = await _load_issue(db, mission_id, issue_id)
+    assessment = await _load_assessment(db, issue_id)
+    if assessment is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This issue has not been assessed yet — details belong on the report itself",
+        )
+    if assessment.proposal_source != "reasoning_model":
+        raise HTTPException(
+            status_code=400,
+            detail="This issue was routed by deterministic fallback; supplements are not accepted",
+        )
+    verdicts = assessment.remedy_eligibility or {}
+    if not any(
+        isinstance(verdict, dict) and verdict.get("eligibility") == "needs_review"
+        for verdict in verdicts.values()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="No remedy on this issue is waiting for more information",
+        )
+    if issue.status not in {IssueStatus.REPORTED.value, IssueStatus.UNDER_REVIEW.value}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Evidence can only be supplemented while the issue is 'reported' or "
+                f"'under_review' (this one is '{issue.status}')"
+            ),
+        )
+
+    note = (body.note or "").strip()
+    evidence = [item.model_dump(mode="json") for item in body.evidence]
+    if not note and not evidence:
+        raise HTTPException(
+            status_code=400,
+            detail="A supplement needs a note or at least one evidence item",
+        )
+
+    if note:
+        issue.description = f"{issue.description}\n\nSupplement: {note[:800]}"[:2000]
+    if evidence:
+        issue.evidence = list(issue.evidence or []) + evidence
+    issue.status = IssueStatus.REPORTED.value
+    issue.updated_at = datetime.utcnow()
+    await audit.append_event(
+        db,
+        mission_id=mission_id,
+        actor="user",
+        action="issue_evidence_supplemented",
+        recorded=True,
+        reason=(
+            f"buyer supplemented issue {issue.issue_id} after its assessment asked for more "
+            f"({len(evidence)} evidence item(s), note={'provided' if note else 'none'}); the "
+            "issue returns to 'reported' so the next assessment re-evaluates the same record — "
+            "the supplement authorizes nothing"
+        ),
+    )
+    await db.commit()
+    return _issue_response(issue, remedy_authority=_remedy_authority(record, order))
+
+
 # --------------------------------------------------------------------------- #
 # Task 10 — resolution assessment & authority proposal.
 #
@@ -2793,6 +3002,44 @@ def _safe_fallback_proposal(reason: str) -> ResolutionProposal:
     )
 
 
+_ELIGIBILITY_VALUES = ("eligible", "ineligible", "needs_review")
+
+
+def _normalize_remedy_eligibility(raw: object) -> dict[str, dict[str, str | None]] | None:
+    """
+    Layer A (sprint M3): normalize the model's per-remedy eligibility verdicts for the
+    customer's choice surface. Only recognized vocabulary survives; a verdict that is
+    malformed, out of vocabulary, or missing its reason becomes `needs_review` with an
+    honest reason — never inferred eligibility, never an invented disqualification. None
+    means the assessor produced no verdicts at all (a fallback or legacy record): the
+    client shows "not evaluated", never a guess.
+    """
+    if not isinstance(raw, dict):
+        return None
+    verdicts: dict[str, dict[str, str | None]] = {}
+    saw_any = False
+    for remedy in ("refund", "replacement"):
+        entry = raw.get(remedy)
+        if isinstance(entry, dict):
+            saw_any = True
+        if not isinstance(entry, dict) or entry.get("eligibility") not in _ELIGIBILITY_VALUES:
+            verdicts[remedy] = {
+                "eligibility": "needs_review",
+                "reason": (
+                    "The assessor did not return a usable verdict for this remedy."
+                    if not isinstance(entry, dict)
+                    else "The assessor's verdict for this remedy was not in the recognized vocabulary."
+                ),
+            }
+            continue
+        reason_text = str(entry.get("reason") or "").strip()[:600]
+        verdicts[remedy] = {
+            "eligibility": entry["eligibility"],
+            "reason": reason_text or "No reason was provided.",
+        }
+    return verdicts if saw_any else None
+
+
 def _validate_resolution_proposal(raw: object, order: ResolveOrderRecord) -> ResolutionProposal:
     """
     Parse the raw, untrusted provider response into the strict ResolutionProposal schema.
@@ -2843,6 +3090,7 @@ def _validate_resolution_proposal(raw: object, order: ResolveOrderRecord) -> Res
         currency=currency,
         confidence=confidence,
         needs_escalation=bool(raw.get("needs_escalation", False)),
+        remedy_eligibility=_normalize_remedy_eligibility(raw.get("remedy_eligibility")),
         source="reasoning_model",
     )
 
@@ -2869,6 +3117,7 @@ def _assessment_response(
         "confidence": assessment.confidence,
         "needs_escalation": assessment.needs_escalation,
         "proposal_source": assessment.proposal_source,
+        "remedy_eligibility": assessment.remedy_eligibility,
         "authority_decision": assessment.authority_decision,
         "decision_reason": assessment.decision_reason,
         "created_at": assessment.created_at.isoformat() if assessment.created_at else None,
@@ -2930,6 +3179,11 @@ async def assess_order_issue(
 
     existing = await _load_assessment(db, issue_id)
     if existing is not None:
+        if issue.status == IssueStatus.REPORTED.value:
+            # Sprint M3: the buyer supplemented evidence after this assessment saw the
+            # record — the honest response is a fresh gated pass over the SAME row, not a
+            # replay of the verdict the narrower evidence produced.
+            return await _assess_issue_row(record, order, issue, db, existing=existing)
         agent_message = (
             f"Issue {issue_id} was already assessed as {existing.assessment_id} "
             f"(decision: {existing.authority_decision}) — nothing new was created."
@@ -3030,6 +3284,7 @@ async def _assess_issue_row(
     assessment.confidence = proposal.confidence
     assessment.needs_escalation = proposal.needs_escalation or decision == "escalate"
     assessment.proposal_source = proposal.source
+    assessment.remedy_eligibility = proposal.remedy_eligibility
     assessment.authority_decision = decision
     assessment.decision_reason = decision_reason
     if existing is None:
@@ -3688,6 +3943,12 @@ def _replacement_note(replacement: ReplacementRecord) -> str:
             f"{' (' + replacement.error_reason + ')' if replacement.error_reason else ''}. "
             "No replacement exists."
         )
+    if replacement.status == ReplacementStatus.ESCALATED.value:
+        return (
+            "No automated replacement provider is connected, so this issue is routed for "
+            "manual review / operator escalation. Nothing was ordered from any merchant, "
+            "no provider was contacted, and no ticket number exists."
+        )
     return (
         "RESOLVE recorded the replacement intent, but no merchant replacement order exists: "
         + (replacement.error_reason or "no replacement provider has accepted it.")
@@ -3711,6 +3972,12 @@ def _replacement_agent_message(replacement: ReplacementRecord) -> str:
             f"Replacement {replacement.replacement_id} failed "
             f"({replacement.error_reason or 'provider failure'}). No replacement exists; "
             "retrying goes through the same record — never a second uncontrolled request."
+        )
+    if replacement.status == ReplacementStatus.ESCALATED.value:
+        return (
+            f"Replacement {replacement.replacement_id} is routed for manual review / operator "
+            "escalation: no automated replacement provider is connected. Nothing was ordered "
+            "and nothing was executed — a human operator will take this issue from here."
         )
     return (
         f"Replacement {replacement.replacement_id} is recorded as RESOLVE's intent and stays "
@@ -3840,6 +4107,17 @@ async def run_replacement_executor(
             ),
             already_existed=True,
         )
+    if existing is not None and existing.status == ReplacementStatus.ESCALATED.value:
+        # Sprint M4: escalated is terminal — a repeat returns the routed record instead of
+        # knocking on a provider that is known to be absent.
+        return _replacement_response(
+            existing,
+            agent_message=(
+                f"Replacement {existing.replacement_id} is already routed for manual review — "
+                "no automated replacement provider is connected, and nothing was re-submitted."
+            ),
+            already_existed=True,
+        )
 
     provider = get_replacement_provider()
     replacement = existing
@@ -3890,31 +4168,46 @@ async def run_replacement_executor(
         try:
             ack = await provider.request_replacement(_replacement_request(order, replacement))
         except ReplacementProviderUnavailable as exc:
-            # The honest outcome when nothing is connected: intent recorded, nothing claimed.
+            # Sprint M4: with no automated replacement provider connected, the honest terminal
+            # outcome is manual review / operator escalation — an audited `escalated` state,
+            # announced on the mission thread, returning 200 with the persisted record. Nothing
+            # was ordered from any merchant, no provider was contacted, and no ticket number is
+            # invented.
             replacement.provider = provider.name
+            replacement.status = ReplacementStatus.ESCALATED.value
             replacement.error_reason = exc.message
             await audit.append(
                 db, mission_id, "buyer_agent", gate,
                 note=(
-                    f"replacement {replacement.replacement_id} not submitted: no provider "
-                    f"connected (provider={provider.name}, product="
+                    f"replacement {replacement.replacement_id} routed to manual review: no "
+                    f"provider connected (provider={provider.name}, product="
                     f"{replacement.replacement_product_id}, value={replacement.value} "
                     f"{replacement.currency}, status={replacement.status})"
                 ),
             )
-            await db.commit()
-            # The failure IS the outcome: return the persisted record alongside the reason,
-            # with the provider-unavailable status code, rather than a bare error string.
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={
-                    **_replacement_response(
-                        replacement,
-                        agent_message=_replacement_agent_message(replacement),
-                        already_existed=pre_existing,
-                    ),
-                    "detail": exc.message,
+            escalated_row = await append_lifecycle_event(
+                db,
+                mission_id=mission_id,
+                user_id=record.user_id,
+                state="resolution_escalated",
+                detail=(
+                    f"Replacement {replacement.replacement_id} on issue {issue_id} routed to "
+                    "manual review / operator escalation: no automated replacement provider is "
+                    "connected. Nothing was ordered and nothing was executed."
+                ),
+                extra_payload={
+                    "issue_id": issue_id,
+                    "replacement_id": replacement.replacement_id,
+                    "status": ReplacementStatus.ESCALATED.value,
+                    "provider": provider.name,
                 },
+            )
+            await db.commit()
+            await broadcast_event_row(escalated_row)
+            return _replacement_response(
+                replacement,
+                agent_message=_replacement_agent_message(replacement),
+                already_existed=pre_existing,
             )
         except ReplacementError as exc:
             replacement.status = ReplacementStatus.FAILED.value
@@ -4046,6 +4339,12 @@ def _return_note(return_record: ReturnRecord) -> str:
             "merchant back — never by sending the same request a second time."
             + (f" ({return_record.failure_reason})" if return_record.failure_reason else "")
         )
+    if return_record.status == ReturnStatus.ESCALATED.value:
+        return (
+            "No automated return provider is connected, so this issue is routed for manual "
+            "review / operator escalation. Nothing was submitted, nothing was executed, and "
+            "no ticket number exists."
+        )
     return (
         "RESOLVE recorded the return intent, but no merchant return exists: "
         + (return_record.failure_reason or "no provider has accepted it.")
@@ -4109,6 +4408,12 @@ def _return_agent_message(return_record: ReturnRecord) -> str:
             f"{return_record.provider} and its answer was lost, so RESOLVE cannot say whether the "
             "merchant has it. The next attempt reads the provider back instead of submitting "
             "again; nothing is retried blind."
+        )
+    if return_record.status == ReturnStatus.ESCALATED.value:
+        return (
+            f"Return {return_record.return_id} is routed for manual review / operator "
+            "escalation: no automated return provider is connected. Nothing was submitted "
+            "and nothing was executed — a human operator will take this issue from here."
         )
     return (
         f"Return {return_record.return_id} is recorded as RESOLVE's intent and stays pending: "
@@ -4430,6 +4735,17 @@ async def run_return_executor(
             ),
             already_existed=True,
         )
+    if existing is not None and existing.status == ReturnStatus.ESCALATED.value:
+        # Sprint M4: escalated is terminal — a repeat returns the routed record instead of
+        # knocking on a provider that is known to be absent.
+        return _return_response(
+            existing,
+            agent_message=(
+                f"Return {existing.return_id} is already routed for manual review — no "
+                "automated return provider is connected, and nothing was re-submitted."
+            ),
+            already_existed=True,
+        )
 
     provider = get_return_provider()
     return_record = existing
@@ -4579,30 +4895,46 @@ async def run_return_executor(
                 },
             )
         except ReturnProviderUnavailable as exc:
-            # The provider said, before doing anything, that it could not act: intent recorded,
-            # nothing submitted, and the claim is handed back.
+            # Sprint M4: with no automated return provider connected, the honest terminal
+            # outcome is manual review / operator escalation — an audited `escalated` state,
+            # announced on the mission thread, returning 200 with the persisted record.
+            # Nothing was submitted, nothing was executed, and no ticket number is invented.
             await _release_return_claim(return_record)
             return_record.provider = provider.name
+            return_record.status = ReturnStatus.ESCALATED.value
             return_record.failure_reason = exc.message
             await audit.append(
                 db, mission_id, "buyer_agent", gate,
                 note=(
-                    f"return {return_record.return_id} not submitted: no provider connected "
-                    f"(provider={provider.name}, product={return_record.original_product_id}, "
+                    f"return {return_record.return_id} routed to manual review: no provider "
+                    f"connected (provider={provider.name}, "
+                    f"product={return_record.original_product_id}, "
                     f"status={return_record.status})"
                 ),
             )
-            await db.commit()
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={
-                    **_return_response(
-                        return_record,
-                        agent_message=_return_agent_message(return_record),
-                        already_existed=pre_existing,
-                    ),
-                    "detail": exc.message,
+            escalated_row = await append_lifecycle_event(
+                db,
+                mission_id=mission_id,
+                user_id=record.user_id,
+                state="resolution_escalated",
+                detail=(
+                    f"Return {return_record.return_id} on issue {issue_id} routed to manual "
+                    "review / operator escalation: no automated return provider is connected. "
+                    "Nothing was submitted and nothing was executed."
+                ),
+                extra_payload={
+                    "issue_id": issue_id,
+                    "return_id": return_record.return_id,
+                    "status": ReturnStatus.ESCALATED.value,
+                    "provider": provider.name,
                 },
+            )
+            await db.commit()
+            await broadcast_event_row(escalated_row)
+            return _return_response(
+                return_record,
+                agent_message=_return_agent_message(return_record),
+                already_existed=pre_existing,
             )
         except ReturnError as exc:
             await _release_return_claim(return_record)

@@ -47,13 +47,15 @@ export const AUTHORITY_DECISION_TONES: Record<string, StatusTone> = {
   escalate: "info",
 };
 
-// Refund: pending | verified | failed. Replacement/return: pending | requested | confirmed | failed.
+// Refund: pending | verified | failed. Replacement/return: pending | requested | confirmed |
+// failed | escalated (M4 manual-review routing).
 export const EXECUTION_STATE_TONES: Record<string, StatusTone> = {
   pending: "pending",
   requested: "info",
   verified: "success",
   confirmed: "success",
   failed: "failure",
+  escalated: "info",
 };
 
 export const RESOLUTION_STATE_TONES: Record<string, StatusTone> = {

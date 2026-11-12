@@ -490,22 +490,26 @@ async def test_golden_lifecycle_from_natural_language_to_an_audited_outcome(
         # The Engine allowed the action, and the tool genuinely ran — which is precisely why the
         # outcome has to be read from the persisted resolution, not from a call-level success flag.
         assert turn["authority_decision"]["approved"] is True
-        assert turn["authority_decision"]["resolution_state"] == "pending"
+        # Sprint M4: with no replacement provider connected the executor routes the issue to the
+        # audited manual-review escalation instead of leaving it pending — never a completion.
+        assert turn["authority_decision"]["resolution_state"] == "escalated"
         repl = next(i for i in await _issues(client, mission_id) if i["issue_id"] == repl_issue_id)
         assert repl["assessment"]["authority_decision"] == "allow"
-        assert repl["resolution"]["resolution_state"] == "pending"
-        # S13 — the record is pending, with no provider and no reference of any kind.
+        assert repl["resolution"]["resolution_state"] == "escalated"
+        # S13 — the record is escalated (routed to a human), with no provider and no reference of
+        # any kind: nothing was submitted and nothing was executed.
         repl_rows = await _rows(test_session, ReplacementRecord, mission_id)
         assert len(repl_rows) == 1
-        assert repl_rows[0].status == "pending"
+        assert repl_rows[0].status == "escalated"
         assert repl_rows[0].provider == "none"
         assert repl_rows[0].provider_reference is None
         assert repl_rows[0].confirmed_at is None
 
-        # ---- STEP 15: retry the failed action — one record, still no success --- #
+        # ---- STEP 15: repeat the action — one record, the escalation replayed -- #
         retry = await _resolve(client, mission_id, repl_issue_id)
-        assert retry.status_code == 503, retry.text
-        assert retry.json()["resolution_state"] == "pending"
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["resolution_state"] == "escalated"
+        assert retry.json()["already_existed"] is True
         assert len(await _rows(test_session, ReplacementRecord, mission_id)) == 1
         # S14 — the refund that already verified is not issued a second time by this chain.
         assert len(refund_api.create_calls) == 1
@@ -527,7 +531,7 @@ async def test_golden_lifecycle_from_natural_language_to_an_audited_outcome(
         assert len(await _rows(test_session, ResolutionRecord, mission_id)) == 2
         assert {row.resolution_state for row in await _rows(test_session, ResolutionRecord, mission_id)} == {
             "verified",
-            "pending",
+            "escalated",
         }
         assert "request_replacement" in (record.mandate or {}).get("authority", {}).get(
             "allowed_actions", []
