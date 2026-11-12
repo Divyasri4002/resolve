@@ -1014,7 +1014,16 @@ export default function WorkspacePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ note: note || null, evidence }),
       });
-      await finishStep(missionId, "Evidence supplemented", null);
+      // Label the supplement by what was actually sent: note-only submissions must never
+      // be announced as evidence, and evidence submissions name their item count.
+      const itemCount = evidence.length;
+      await finishStep(
+        missionId,
+        itemCount > 0
+          ? `Supplement recorded — ${itemCount} evidence item${itemCount === 1 ? "" : "s"} attached`
+          : "Supplement recorded — note only, no evidence items attached",
+        null
+      );
       // The supplement returns the issue to `reported`; assess re-evaluates the SAME
       // assessment row against the fuller record.
       const reassessed = await apiRequest<OperationReply>(

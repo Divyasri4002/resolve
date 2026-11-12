@@ -110,6 +110,32 @@ function assessmentWarning(
   return generic;
 }
 
+/**
+ * Shows when the assessment was produced and, when the row has been re-evaluated in place
+ * (update-in-place keeps one assessment_id), distinguishes the original time from the
+ * re-assessment time. No timestamps in the record → nothing is claimed.
+ */
+function AssessmentTimestamp({
+  assessment,
+}: {
+  assessment: NonNullable<OrderIssue["assessment"]>;
+}) {
+  const created = assessment.created_at;
+  const updated = assessment.updated_at;
+  let label: string | null = null;
+  if (updated && created && updated !== created) {
+    label = `First assessed ${new Date(created).toLocaleString()} · re-assessed ${new Date(
+      updated
+    ).toLocaleString()}`;
+  } else if (created) {
+    label = `Assessed ${new Date(created).toLocaleString()}`;
+  } else if (updated) {
+    label = `Last updated ${new Date(updated).toLocaleString()}`;
+  }
+  if (!label) return null;
+  return <p className="mt-1 text-[10px] text-text-charcoal/45">{label}</p>;
+}
+
 function issueTypeLabel(value: string): string {
   return ISSUE_TYPES.find((t) => t.value === value)?.label ?? value;
 }
@@ -644,6 +670,7 @@ export function IssuePanel({
                       Authority decision: {issue.assessment.authority_decision}
                     </Badge>
                   </div>
+                  <AssessmentTimestamp assessment={issue.assessment} />
                   <p className="mt-1.5 text-text-charcoal/80">
                     Proposed resolution:{" "}
                     <span className="font-semibold">

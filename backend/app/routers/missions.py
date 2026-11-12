@@ -994,7 +994,7 @@ async def confirm_shopping_checkout(
     merchant_suffix = f" from {selected.merchant}" if selected.merchant else ""
     agent_message = (
         f"Checkout confirmed for {selected.title}{merchant_suffix}. "
-        "Ready for payment — the payment step itself will come in a future task. "
+        "Ready for payment — the Razorpay TEST checkout opens next. "
         "No payment has been made and no order has been created."
     )
 

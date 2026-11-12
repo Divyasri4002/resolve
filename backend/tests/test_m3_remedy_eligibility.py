@@ -335,3 +335,149 @@ async def test_reassessment_after_supplement_updates_the_same_row(
         assert "Supplement: The photo is now attached." in (
             reassessor.contexts[0]["issue"]["description"]
         )
+
+
+# --------------------------------------------------------------------------- #
+# T1/T2 (post-purchase UX consistency): what the supplement actually carried
+# must be named exactly — a note-only supplement is never evidence, and an
+# evidence supplement names its item count and reaches the assessment context.
+# --------------------------------------------------------------------------- #
+async def test_note_only_supplement_is_never_counted_as_evidence(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        install_fake_reasoning(
+            _proposal(
+                {
+                    "refund": {"eligibility": "needs_review", "reason": "no photo yet"},
+                    "replacement": {"eligibility": "needs_review", "reason": "unclear"},
+                }
+            )
+        )
+        issue_id = await _issue(client, mission_id, kind="refund")
+        first = await _assess(client, mission_id, issue_id)
+
+        resp = await _supplement(
+            client, mission_id, issue_id, {"note": "The dupatta tore along the seam."}
+        )
+        assert resp.status_code == 200, resp.text
+        issue = resp.json()
+        # A note-only supplement attaches NO evidence items — the record must not claim any.
+        assert issue["evidence"] == []
+        assert "Supplement: The dupatta tore along the seam." in issue["description"]
+
+        # The audit names exactly what arrived: zero items, note provided.
+        async with test_session() as session:
+            audits = (
+                await session.scalars(
+                    select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                )
+            ).all()
+        supplemented = [a for a in audits if a.action == "issue_evidence_supplemented"]
+        assert len(supplemented) == 1
+        assert "0 evidence item(s)" in supplemented[0].reason
+        assert "note=provided" in supplemented[0].reason
+
+        # Re-assessment re-evaluates the SAME row, bumps its updated_at, and puts the
+        # issue back under review — one row, one verdict, visibly re-timed.
+        install_fake_reasoning(
+            _proposal(
+                {
+                    "refund": {
+                        "eligibility": "eligible",
+                        "reason": "the note describes clear damage",
+                    },
+                    "replacement": {"eligibility": "needs_review", "reason": "still unclear"},
+                }
+            )
+        )
+        second = await _assess(client, mission_id, issue_id)
+        assert second["assessment_id"] == first["assessment_id"]
+
+        refreshed = await _issue_payload(client, mission_id, issue_id)
+        assert refreshed["status"] == "under_review"
+
+        async with test_session() as session:
+            row = await session.get(ResolutionAssessmentRecord, second["assessment_id"])
+            count = await session.scalar(
+                select(func.count())
+                .select_from(ResolutionAssessmentRecord)
+                .where(ResolutionAssessmentRecord.issue_id == issue_id)
+            )
+        assert count == 1
+        assert row.updated_at is not None
+        assert row.created_at is not None
+        assert row.updated_at != row.created_at
+
+
+async def test_evidence_supplement_names_its_item_count_and_reaches_the_context(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    async with client:
+        mission_id = await mission_setup(client)
+        install_fake_reasoning(
+            _proposal(
+                {
+                    "refund": {"eligibility": "needs_review", "reason": "no photo yet"},
+                    "replacement": {"eligibility": "needs_review", "reason": "unclear"},
+                }
+            )
+        )
+        issue_id = await _issue(client, mission_id, kind="refund")
+        await _assess(client, mission_id, issue_id)
+
+        resp = await _supplement(
+            client,
+            mission_id,
+            issue_id,
+            {
+                "evidence": [
+                    {"kind": "photo_url", "url": "https://example.test/tear.jpg"},
+                    {"kind": "written_description", "description": "seam split on first wear"},
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        issue = resp.json()
+        assert len(issue["evidence"]) == 2
+
+        # The audit's item count matches what was sent — the number the UI reports.
+        async with test_session() as session:
+            audits = (
+                await session.scalars(
+                    select(AuditLogRecord).where(AuditLogRecord.mission_id == mission_id)
+                )
+            ).all()
+        supplemented = [a for a in audits if a.action == "issue_evidence_supplemented"]
+        assert len(supplemented) == 1
+        assert "2 evidence item(s)" in supplemented[0].reason
+        assert "note=none" in supplemented[0].reason
+
+        # The re-assessment context carries the evidence items themselves, not just words.
+        reassessor = install_fake_reasoning(
+            _proposal(
+                {
+                    "refund": {"eligibility": "eligible", "reason": "photo shows the tear"},
+                    "replacement": {"eligibility": "needs_review", "reason": "unclear"},
+                }
+            )
+        )
+        await _assess(client, mission_id, issue_id)
+        assert len(reassessor.contexts) == 1
+        context_evidence = reassessor.contexts[0]["issue"]["evidence"]
+        assert any(
+            e["kind"] == "photo_url" and e["url"] == "https://example.test/tear.jpg"
+            for e in context_evidence
+        )
+        assert any(
+            e["kind"] == "written_description"
+            and e.get("description") == "seam split on first wear"
+            for e in context_evidence
+        )

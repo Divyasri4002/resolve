@@ -141,7 +141,10 @@ export function PaymentPanel({
         </div>
       )}
 
-      {missionStatus !== "payment_verified" && (
+      {/* The payment record is the authority on whether payment actions make sense: a
+          verified Razorpay payment never offers payment CTAs again, whatever the mission
+          status — only null/pending/failed records may start or resume checkout. */}
+      {payment?.status !== "verified" && (
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-text-charcoal/8 pt-4">
           <span className="inline-flex items-center gap-1.5 text-[11px] text-text-charcoal/50">
             <Lock size={11} className="shrink-0" />

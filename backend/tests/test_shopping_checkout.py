@@ -327,6 +327,11 @@ async def test_confirm_checkout_changes_state(
     assert "Checkout confirmed" in data["agent_message"]
     assert "Dove Hair Fall Rescue Shampoo" in data["agent_message"]
     assert "No payment has been made" in data["agent_message"]
+    # The message describes the REAL next step — the Razorpay TEST checkout — never a
+    # "future task"; and it still states that no order exists yet.
+    assert "future task" not in data["agent_message"]
+    assert "Razorpay TEST checkout opens next" in data["agent_message"]
+    assert "no order has been created" in data["agent_message"]
 
 
 @pytest.mark.asyncio
