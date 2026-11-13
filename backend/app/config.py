@@ -177,6 +177,42 @@ class Settings(BaseSettings):
     # it. AWS caps object-lock retention at 36,500 days (100 years; 1 year = 365 days).
     ledger_worm_min_retention_days: int = Field(default=365, gt=0, le=36500)
 
+    # Evidence object store (native file/photo uploads, Stage 1) — user-uploaded issue
+    # evidence lives in its OWN bucket with its OWN credentials, deliberately separate
+    # from the ledger store above. The ledger bucket is WORM (Object Lock COMPLIANCE,
+    # 365-day floor): nothing written there can ever be erased, which is the point for
+    # tamper-evident purchase evidence and the exact opposite of what user photos need —
+    # a privacy erasure path must stay possible. Sharing the ledger credentials would
+    # also widen their authority: those keys authorize exactly one head-key path and
+    # must never gain put/get on arbitrary keys. This is a private, deletable, NON-WORM
+    # store; it is never the publisher's target. Endpoint/bucket/access/secret are
+    # environment-only — never stored in the database, never returned in a response,
+    # never logged. Empty endpoint, bucket, OR credentials DISABLE evidence storage
+    # outright (the same disable-by-default rule as ledger_object_store_*):
+    # EvidenceStore.from_settings returns None and callers refuse honestly rather than
+    # falling back to container-local filesystem, which is not durable and is a
+    # privacy liability for user uploads.
+    evidence_object_store_endpoint: str = ""
+    evidence_object_store_region: str = "us-east-1"
+    evidence_object_store_bucket: str = ""
+    evidence_object_store_access_key: str = ""
+    evidence_object_store_secret_key: str = ""
+    evidence_object_store_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
+    # Upload limits, enforced by app/evidence_store.py on the WHOLE batch BEFORE any
+    # byte is stored (validate-all-then-store). Uploads are untrusted bytes: the
+    # sniffed content signature decides the MIME type, the client-declared type is
+    # only cross-checked, and anything not on the allowlist is refused. SVG is
+    # deliberately never allowed (scriptable content — a stored-SVG fetch is an XSS
+    # vector), GIF neither (legacy container, no benefit). The per-issue cap is
+    # configured here but enforced at the supplement endpoint (P2); the store layer
+    # enforces only the per-request bounds.
+    evidence_max_file_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    evidence_max_request_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
+    evidence_max_files_per_request: int = Field(default=5, ge=1, le=100)
+    evidence_max_evidence_per_issue: int = Field(default=10, ge=1, le=1000)
+    evidence_allowed_mime_types: str = "image/jpeg,image/png,image/webp"
+
     # Auth & CORS
     auth_secret: str = "resolve-auth-secret-key-change-in-production"
     auth_cookie_name: str = "resolve_session"

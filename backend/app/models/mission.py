@@ -431,10 +431,24 @@ class Authority(BaseModel):
 
 
 class EvidenceItem(BaseModel):
-    kind: str  # e.g. "delivery_photo", "invoice", "carrier_exception_event", "merchant_email"
+    """One piece of evidence attached to an issue. Client-supplied items (JSON
+    intake, JSON supplement) may carry only metadata about EXTERNAL artifacts —
+    kind/url/description. Upload-backed fields (display_name, mime, size_bytes,
+    sha256, storage_key, bucket) are populated EXCLUSIVELY by the backend multipart
+    path after the bytes are validated and stored; pydantic's default extra=ignore
+    means a JSON caller cannot inject them, so no client ever asserts storage truth."""
+
+    kind: str  # e.g. "delivery_photo", "invoice", "carrier_exception_event", "merchant_email", "uploaded_file"
     url: str | None = None
     description: str | None = None
     collected_at: datetime = Field(default_factory=datetime.utcnow)
+    # Upload-backed fields — backend-written only (see docstring above):
+    display_name: str | None = None
+    mime: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = None
+    storage_key: str | None = None
+    bucket: str | None = None
 
 
 class OrderIssue(BaseModel):

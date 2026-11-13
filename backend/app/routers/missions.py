@@ -14,7 +14,9 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from starlette.responses import JSONResponse
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException
+from starlette.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -59,6 +61,18 @@ from app.auth.dependencies import (
     is_service_principal,
 )
 from app.ledger.verify import CURRENCY_NOT_CURRENT, submission_currency_for_app
+from app.evidence_store import (
+    EvidenceLimits,
+    EvidenceStore,
+    EvidenceStoreFailure,
+    EvidenceValidationError,
+    IncomingEvidence,
+    ObjectNotFound,
+    ServerError,
+    StoredEvidence,
+    TransportFailure,
+    sanitize_display_name,
+)
 from app.models.db_models import (
     MessageRecord,
     PurchaseAuthorizationRecord,
@@ -2799,24 +2813,179 @@ class SupplementIssueEvidenceRequest(BaseModel):
     evidence: list[EvidenceItem] = Field(default_factory=list)
 
 
+# Upload-backed evidence (kind="uploaded_file") metadata is built EXCLUSIVELY here,
+# after bytes are validated and stored — a JSON caller cannot inject storage truth
+# (pydantic ignores extra fields), and no client ever asserts what is in the bucket.
+_EVIDENCE_VALIDATION_STATUS = {
+    "too_many_files": 400,
+    "empty_file": 400,
+    "too_large": 413,
+    "request_too_large": 413,
+    "unsupported_type": 415,
+    "mime_mismatch": 415,
+    "malformed_image": 415,
+    "invalid_key_component": 400,
+    "invalid_key": 400,
+    "sha_mismatch": 409,
+}
+_MULTIPART_OVERHEAD_BYTES = 65536
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def get_evidence_store() -> EvidenceStore | None:
+    """Evidence storage as a dependency (None = not configured, disable-by-default);
+    tests override it hermetically via app.dependency_overrides."""
+    return EvidenceStore.from_settings(get_settings())
+
+
+async def _read_upload_capped(
+    upload: UploadFile, limits: EvidenceLimits, running_total: list[int]
+) -> bytes:
+    """Read one uploaded part in bounded chunks, enforcing the per-file cap and the
+    running batch cap DURING the read — an oversized part is cut off at the limit,
+    never buffered in full."""
+    chunks: list[bytes] = []
+    file_bytes = 0
+    while True:
+        chunk = await upload.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        file_bytes += len(chunk)
+        running_total[0] += len(chunk)
+        if file_bytes > limits.max_file_bytes:
+            raise EvidenceValidationError(
+                "too_large",
+                f"an evidence file exceeds the {limits.max_file_bytes}-byte limit",
+            )
+        if running_total[0] > limits.max_request_bytes:
+            raise EvidenceValidationError(
+                "request_too_large",
+                f"the supplement exceeds the {limits.max_request_bytes}-byte batch limit",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _parse_multipart_supplement(
+    request: Request, limits: EvidenceLimits
+) -> tuple[str | None, str | None, list[tuple[str | None, IncomingEvidence]]]:
+    """Parse a multipart supplement form into (note, description, files).
+
+    Limits are enforced while streaming: a Content-Length over the batch budget is
+    rejected before any parsing, file parts are counted against the per-request cap
+    before their bytes are read, and every part is read in bounded chunks. A request
+    without a Content-Length (chunked) is still bounded — starlette spools large
+    parts to disk rather than memory, and the chunked reads refuse anything over
+    budget; the spooled remainder is discarded with the request.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit():
+        if int(content_length) > limits.max_request_bytes + _MULTIPART_OVERHEAD_BYTES:
+            raise EvidenceValidationError(
+                "request_too_large",
+                f"the supplement exceeds the {limits.max_request_bytes}-byte batch limit",
+            )
+    try:
+        form = await request.form()
+    except MultiPartException as exc:
+        raise HTTPException(status_code=400, detail="Malformed multipart form body") from exc
+
+    note: str | None = None
+    description: str | None = None
+    parts: list[UploadFile] = []
+    for key, value in form.multi_items():
+        if isinstance(value, UploadFile):
+            parts.append(value)
+        elif key == "note" and note is None and isinstance(value, str):
+            note = value
+        elif key == "description" and description is None and isinstance(value, str):
+            description = value
+    if len(parts) > limits.max_files_per_request:
+        raise EvidenceValidationError(
+            "too_many_files",
+            f"a supplement carries at most {limits.max_files_per_request} file(s)",
+        )
+    running_total = [0]
+    files: list[tuple[str | None, IncomingEvidence]] = []
+    for part in parts:
+        data = await _read_upload_capped(part, limits, running_total)
+        files.append(
+            (part.filename, IncomingEvidence(data=data, declared_mime=part.content_type))
+        )
+    return note, description, files
+
+
+async def _store_supplement_files(
+    mission_id: str,
+    issue_id: str,
+    db: AsyncSession,
+    store: EvidenceStore,
+    incoming: list[tuple[str | None, IncomingEvidence]],
+) -> list[StoredEvidence]:
+    """Store a validated upload batch in the private NON-WORM evidence bucket. The
+    issue record is NOT touched here — evidence metadata is persisted by the caller
+    only after every storage write of the batch succeeded. A mid-batch failure
+    triggers best-effort cleanup; anything whose deletion cannot be confirmed is
+    audited durably as `evidence_orphan_tracked` and the caller surfaces 502 — the
+    issue never carries metadata for bytes that are not provably stored."""
+    try:
+        batch = await store.store_files(
+            mission_id,
+            issue_id,
+            [incoming_evidence for _, incoming_evidence in incoming],
+        )
+    except EvidenceStoreFailure as exc:
+        if exc.orphaned:
+            await audit.append_event(
+                db,
+                mission_id=mission_id,
+                actor="system",
+                action="evidence_orphan_tracked",
+                recorded=True,
+                reason=(
+                    f"evidence upload for issue {issue_id} failed mid-batch; "
+                    f"{len(exc.orphaned)} stored object(s) could not be confirmed deleted "
+                    f"and await reconciliation ({', '.join(o.storage_key for o in exc.orphaned)}); "
+                    "nothing was attached to the issue and nothing was authorized"
+                ),
+            )
+            await db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail="Evidence storage failed; the upload was not attached to the issue",
+        ) from exc
+    except EvidenceValidationError as exc:
+        status = _EVIDENCE_VALIDATION_STATUS.get(exc.code, 400)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return batch.stored
+
+
 @router.post("/{mission_id}/order/issues/{issue_id}/supplement", response_model=dict)
 async def supplement_issue_evidence(
     mission_id: str,
     issue_id: str,
-    body: SupplementIssueEvidenceRequest,
+    request: Request,
     current_user: UserRecord | None = Depends(get_current_user_optional),
     db: AsyncSession = Depends(get_db),
+    store: EvidenceStore | None = Depends(get_evidence_store),
 ):
     """
     Record the buyer's supplemented evidence on an issue whose assessment asked for more.
 
     Sprint M3's Layer A loop: when the assessor marked a remedy `needs_review`, the
     workspace prompts for what was missing (a photo, a clearer description). This endpoint
-    accepts exactly that — a bounded note and/or evidence items — appends them to the issue
+    accepts exactly that — a bounded note and/or evidence items, as JSON or as a
+    multipart/form-data form carrying actual uploaded files — appends them to the issue
     record, and returns the issue to `reported` so the next /assess call re-evaluates the
     SAME assessment row against the fuller record. It changes nothing else: no verdict, no
     authority value, no execution of anything. The assessment's old verdict is never
     presented again as if it had seen the supplement.
+
+    Uploaded files are validated in full before any storage write, stored in the private
+    evidence bucket (never the WORM ledger bucket), and persisted as `uploaded_file`
+    evidence metadata only after every storage write of the batch succeeded. The model
+    context later sees compact metadata — never storage credentials, internal storage
+    paths, or file bytes. A supplement still authorizes nothing.
     """
     record = await _load_mission_for_shopping_action(mission_id, current_user, db)
     order = await _load_order(db, mission_id)
@@ -2852,18 +3021,79 @@ async def supplement_issue_evidence(
             ),
         )
 
-    note = (body.note or "").strip()
-    evidence = [item.model_dump(mode="json") for item in body.evidence]
-    if not note and not evidence:
+    limits = EvidenceLimits.from_settings(get_settings())
+    evidence_items: list[dict] = []
+    if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        try:
+            note_raw, description_raw, pending_uploads = await _parse_multipart_supplement(
+                request, limits
+            )
+        except EvidenceValidationError as exc:
+            status = _EVIDENCE_VALIDATION_STATUS.get(exc.code, 400)
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        note = (note_raw or "").strip()
+        new_count = len(pending_uploads)
+    else:
+        try:
+            body = SupplementIssueEvidenceRequest(**await request.json())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A supplement is JSON {note, evidence} or a multipart form with "
+                    "a note and/or files"
+                ),
+            ) from exc
+        note = (body.note or "").strip()
+        pending_uploads: list[tuple[str | None, IncomingEvidence]] = []
+        new_count = len(body.evidence)
+        if body.evidence:
+            evidence_items = [item.model_dump(mode="json") for item in body.evidence]
+
+    if len(issue.evidence or []) + new_count > limits.max_evidence_per_issue:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"An issue carries at most {limits.max_evidence_per_issue} evidence item(s); "
+                "this supplement would exceed that"
+            ),
+        )
+    if not note and new_count == 0:
         raise HTTPException(
             status_code=400,
             detail="A supplement needs a note or at least one evidence item",
         )
 
+    if pending_uploads:
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Evidence upload is not available — the evidence store is not configured"
+                ),
+            )
+        stored = await _store_supplement_files(
+            mission_id, issue_id, db, store, pending_uploads
+        )
+        evidence_items = [
+            {
+                "kind": "uploaded_file",
+                "description": description_raw,
+                "collected_at": datetime.utcnow().isoformat(),
+                "display_name": sanitize_display_name(filename),
+                "mime": st.mime,
+                "size_bytes": st.size_bytes,
+                "sha256": st.sha256,
+                "storage_key": st.storage_key,
+                "bucket": st.bucket,
+            }
+            for (filename, _), st in zip(pending_uploads, stored)
+        ]
+
     if note:
         issue.description = f"{issue.description}\n\nSupplement: {note[:800]}"[:2000]
-    if evidence:
-        issue.evidence = list(issue.evidence or []) + evidence
+    if evidence_items:
+        issue.evidence = list(issue.evidence or []) + evidence_items
     issue.status = IssueStatus.REPORTED.value
     issue.updated_at = datetime.utcnow()
     await audit.append_event(
@@ -2874,13 +3104,87 @@ async def supplement_issue_evidence(
         recorded=True,
         reason=(
             f"buyer supplemented issue {issue.issue_id} after its assessment asked for more "
-            f"({len(evidence)} evidence item(s), note={'provided' if note else 'none'}); the "
+            f"({len(evidence_items)} evidence item(s), note={'provided' if note else 'none'}); the "
             "issue returns to 'reported' so the next assessment re-evaluates the same record — "
             "the supplement authorizes nothing"
         ),
     )
     await db.commit()
     return _issue_response(issue, remedy_authority=_remedy_authority(record, order))
+
+
+@router.get("/{mission_id}/order/issues/{issue_id}/evidence/{index}")
+async def get_issue_evidence_file(
+    mission_id: str,
+    issue_id: str,
+    index: int,
+    current_user: UserRecord | None = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+    store: EvidenceStore | None = Depends(get_evidence_store),
+):
+    """
+    Stream one stored evidence file for an issue the caller owns. Authenticated,
+    ownership-checked, index-checked; only upload-backed items recorded by this
+    backend are servable, the recorded MIME is re-checked against the allowlist,
+    and the bytes are verified against the persisted SHA-256 before anything is
+    served. nosniff stops a browser guessing a type; the disposition is inline with
+    the sanitized display name; caching is private no-store. No bucket credential,
+    presigned URL, or internal path is ever exposed — the bytes pass through this
+    endpoint and stop.
+    """
+    await _load_mission_for_shopping_action(mission_id, current_user, db)
+    if await _load_order(db, mission_id) is None:
+        raise HTTPException(status_code=404, detail="No order exists for this mission")
+    issue = await _load_issue(db, mission_id, issue_id)
+    items = issue.evidence or []
+    if index < 0 or index >= len(items):
+        raise HTTPException(status_code=404, detail="Evidence item not found")
+    item = items[index]
+    if (
+        not isinstance(item, dict)
+        or item.get("kind") != "uploaded_file"
+        or not isinstance(item.get("storage_key"), str)
+    ):
+        raise HTTPException(status_code=404, detail="Evidence item not found")
+    if store is None:
+        raise HTTPException(status_code=503, detail="Evidence storage is not configured")
+    limits = EvidenceLimits.from_settings(get_settings())
+    mime = item.get("mime")
+    if mime not in limits.allowed_mime_types:
+        raise HTTPException(status_code=404, detail="Evidence item not found")
+    try:
+        obj = await store.read(item["storage_key"], expected_sha256=item.get("sha256"))
+    except EvidenceValidationError as exc:
+        if exc.code == "sha_mismatch":
+            raise HTTPException(
+                status_code=409,
+                detail="Stored evidence no longer matches its recorded digest",
+            ) from exc
+        raise HTTPException(status_code=404, detail="Evidence item not found") from exc
+    except ObjectNotFound:
+        raise HTTPException(status_code=404, detail="Evidence item not found")
+    except (TransportFailure, ServerError) as exc:
+        raise HTTPException(
+            status_code=502, detail="Evidence storage is temporarily unavailable"
+        ) from exc
+
+    display_name = sanitize_display_name(item.get("display_name"))
+    body = obj.body
+
+    async def _chunks():
+        for offset in range(0, len(body), 65536):
+            yield body[offset : offset + 65536]
+
+    return StreamingResponse(
+        _chunks(),
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'inline; filename="{display_name}"',
+            "Cache-Control": "private, no-store",
+            "Content-Length": str(len(body)),
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2917,6 +3221,30 @@ async def _load_assessment(
         )
     )
     return result.scalar_one_or_none()
+
+
+def _evidence_for_context(items: list[dict] | None) -> list[dict]:
+    """The evidence the reasoning model is shown. Upload-backed items are compacted to
+    human-meaningful metadata only — never storage keys, bucket names, digests, or file
+    bytes: storage handles are the backend's concern, and the model judges what the
+    buyer attached, not where it lives. Externally-referenced kinds (photo_url,
+    written_description, ...) pass through unchanged."""
+    compact: list[dict] = []
+    for item in items or []:
+        if isinstance(item, dict) and item.get("kind") == "uploaded_file":
+            compact.append(
+                {
+                    "kind": "uploaded_file",
+                    "display_name": item.get("display_name"),
+                    "mime": item.get("mime"),
+                    "size_bytes": item.get("size_bytes"),
+                    "description": item.get("description"),
+                    "collected_at": item.get("collected_at"),
+                }
+            )
+        else:
+            compact.append(item)
+    return compact
 
 
 def _build_resolution_context(
@@ -2968,7 +3296,7 @@ def _build_resolution_context(
             "description": issue.description,
             "requested_resolution": issue.requested_resolution,
             "status": issue.status,
-            "evidence": issue.evidence or [],
+            "evidence": _evidence_for_context(issue.evidence),
             "category_questions": questions_payload(issue.issue_type),
             "answers": dict(issue.answers or {}),
         },
