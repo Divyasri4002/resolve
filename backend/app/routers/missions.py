@@ -15,7 +15,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.datastructures import UploadFile
-from starlette.formparsers import MultiPartException
+from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, update
@@ -52,6 +52,7 @@ from app.authority.engine import (
     evaluate_purchase,
     refund_ceiling,
 )
+from app.body_limit import FRAMING_ALLOWANCE_BYTES as _MULTIPART_OVERHEAD_BYTES
 from app.config import get_settings
 from app.database import get_db
 from app.db_enforcement import require_protected_ops
@@ -2828,7 +2829,6 @@ _EVIDENCE_VALIDATION_STATUS = {
     "invalid_key": 400,
     "sha_mismatch": 409,
 }
-_MULTIPART_OVERHEAD_BYTES = 65536
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
@@ -2871,12 +2871,13 @@ async def _parse_multipart_supplement(
 ) -> tuple[str | None, str | None, list[tuple[str | None, IncomingEvidence]]]:
     """Parse a multipart supplement form into (note, description, files).
 
-    Limits are enforced while streaming: a Content-Length over the batch budget is
-    rejected before any parsing, file parts are counted against the per-request cap
-    before their bytes are read, and every part is read in bounded chunks. A request
-    without a Content-Length (chunked) is still bounded — starlette spools large
-    parts to disk rather than memory, and the chunked reads refuse anything over
-    budget; the spooled remainder is discarded with the request.
+    Limits are enforced while streaming: the ASGI body-limit middleware
+    (app.body_limit) counts incoming bytes BEFORE they reach this parser, so a
+    request over the batch budget — declared via Content-Length or chunked — is
+    refused with 413 before any spooling can happen. The endpoint's own
+    Content-Length pre-check remains as defense in depth, file parts are counted
+    against the per-request cap before their bytes are read, and every part is read
+    in bounded chunks.
     """
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit():
@@ -2887,8 +2888,11 @@ async def _parse_multipart_supplement(
             )
     try:
         form = await request.form()
-    except MultiPartException as exc:
-        raise HTTPException(status_code=400, detail="Malformed multipart form body") from exc
+    except ClientDisconnect as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="The request was aborted before the body was fully received",
+        ) from exc
 
     note: str | None = None
     description: str | None = None
@@ -3036,6 +3040,11 @@ async def supplement_issue_evidence(
     else:
         try:
             body = SupplementIssueEvidenceRequest(**await request.json())
+        except ClientDisconnect as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="The request was aborted before the body was fully received",
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=422,

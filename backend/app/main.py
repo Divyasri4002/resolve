@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.body_limit import EvidenceBodyLimitMiddleware
 from app.config import get_settings
 from app.database import async_session, engine, init_models
 from app.db_enforcement import current_report, initialize as initialize_db_enforcement
@@ -95,6 +96,11 @@ cors_origins = [
     "http://127.0.0.1:3000",
 ]
 allowed_origins = list(dict.fromkeys([o for o in cors_origins if o]))
+
+# P2.1 request-body resource protection. Registered BEFORE CORSMiddleware so the CORS
+# layer sits outside it and wraps the 413 rejection — cross-origin browser clients can
+# then read the rejection instead of an opaque network error.
+app.add_middleware(EvidenceBodyLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
