@@ -44,6 +44,7 @@ never silently assumed gone, never silently left behind without a record.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -68,6 +69,10 @@ from app.ledger.store import (
 _MIME_JPEG = "image/jpeg"
 _MIME_PNG = "image/png"
 _MIME_WEBP = "image/webp"
+
+# Error messages in this module never carry keys, buckets, credentials, or user
+# text (see the class docstrings), so logging them leaks nothing.
+logger = logging.getLogger(__name__)
 
 _PNG_IEND_TAIL = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 
@@ -465,6 +470,18 @@ class EvidenceStore:
             try:
                 await self._client.put_object(key, item.data, item.mime)
             except ObjectStoreError as exc:
+                # The 502 the caller sees is generic by design; without this line
+                # the ORIGINAL storage error (unreachable endpoint vs 403 vs 5xx)
+                # would be invisible to the operator. Message is method/status only.
+                logger.error(
+                    "evidence storage failed for mission %s issue %s during a "
+                    "%d-file batch: %s: %s",
+                    mission_id,
+                    issue_id,
+                    len(validated),
+                    type(exc).__name__,
+                    exc,
+                )
                 orphans = await self._cleanup_after_failure(stored)
                 if orphans:
                     raise EvidenceStoreFailure(
