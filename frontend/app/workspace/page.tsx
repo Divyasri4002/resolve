@@ -28,6 +28,7 @@ import {
   getMission,
   listMissions,
   revokeAuthority,
+  supplementIssueMultipart,
 } from "@/lib/api";
 import { formatMoney, missionStatusLabel } from "@/lib/format";
 import { useConversationScroll } from "@/lib/useConversationScroll";
@@ -995,28 +996,52 @@ export default function WorkspacePage() {
   const handleManualReview = (issueId: string) =>
     runIssueOperation(issueId, "manual-review", "Manual review request");
 
-  // Sprint M3: supplement a `needs_review` remedy with the evidence the assessor asked for,
-  // then re-run the assessment against the same issue row. Only the note and evidence items
-  // travel; the backend gates the supplement on the assessor having marked a remedy
-  // needs_review and appends them to the persisted issue before returning it to `reported`.
+  // Sprint M3 / P3: supplement a `needs_review` remedy with the evidence the assessor asked
+  // for, then re-run the assessment against the same issue row. Files travel as multipart
+  // parts the backend stores and verifies; a note/description-only supplement keeps the JSON
+  // path so the written description stays a real evidence item. The backend gates the
+  // supplement on the assessor having marked a remedy needs_review, appends what was sent to
+  // the persisted issue, and returns it to `reported`.
   const handleSupplementIssue = async (
     issueId: string,
     note: string,
-    evidence: { kind: string; url?: string | null; description?: string | null }[]
+    description: string,
+    files: File[],
+    onUploadProgress?: (fraction: number) => void
   ): Promise<boolean> => {
     if (!selectedId || isIssueBusy) return false;
     const missionId = selectedId;
     setIsIssueBusy(true);
     setIssueError(null);
     try {
-      await apiRequest<OrderIssue>(`/missions/${missionId}/order/issues/${issueId}/supplement`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: note || null, evidence }),
-      });
+      if (files.length > 0) {
+        await supplementIssueMultipart({
+          missionId,
+          issueId,
+          note,
+          description,
+          files,
+          onProgress: onUploadProgress,
+        });
+      } else {
+        await apiRequest<OrderIssue>(
+          `/missions/${missionId}/order/issues/${issueId}/supplement`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              note: note || null,
+              evidence:
+                description.trim().length > 0
+                  ? [{ kind: "written_description", description: description.trim() }]
+                  : [],
+            }),
+          }
+        );
+      }
       // Label the supplement by what was actually sent: note-only submissions must never
       // be announced as evidence, and evidence submissions name their item count.
-      const itemCount = evidence.length;
+      const itemCount = files.length;
       await finishStep(
         missionId,
         itemCount > 0

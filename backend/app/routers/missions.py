@@ -2492,6 +2492,20 @@ def _remedy_authority(record: MissionRecord, order: ResolveOrderRecord) -> dict:
     }
 
 
+def _public_evidence(items: list[dict] | None) -> list[dict]:
+    """The evidence the browser is shown — WHAT was attached, never WHERE it is stored.
+    storage_key/bucket/sha256 stay in the persisted row (the retrieval endpoint reads them
+    server-side); the client-facing payload follows the same compact rule as the
+    reasoning-model context."""
+    if not items:
+        return []
+    return [
+        {k: v for k, v in item.items() if k not in ("storage_key", "bucket", "sha256")}
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
 def _issue_response(
     issue: OrderIssueRecord,
     agent_message: str | None = None,
@@ -2513,7 +2527,7 @@ def _issue_response(
         "description": issue.description,
         "requested_resolution": issue.requested_resolution,
         "status": issue.status,
-        "evidence": issue.evidence or [],
+        "evidence": _public_evidence(issue.evidence),
         "questions": questions_payload(issue.issue_type),
         "answers": dict(issue.answers or {}),
         "created_at": issue.created_at.isoformat() if issue.created_at else None,

@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import type { OrderIssue } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import type { OrderIssue, OrderIssueEvidence } from "@/lib/types";
+import { fetchEvidenceObjectUrl } from "@/lib/api";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
-import { formatMoney } from "@/lib/format";
+import { formatBytes, formatMoney } from "@/lib/format";
 import {
   AUTHORITY_DECISION_TONES,
   EXECUTION_STATE_TONES,
@@ -16,10 +17,12 @@ import {
   AlertCircle,
   CheckCircle2,
   ClipboardList,
+  ImageOff,
   ImagePlus,
   Loader2,
   MessageSquareWarning,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 
 const ISSUE_TYPES = [
@@ -37,6 +40,47 @@ const RESOLUTIONS = [
   { value: "refund", label: "Refund" },
   { value: "replacement", label: "Replacement" },
 ];
+
+// P3 native evidence uploads — the same limits the backend enforces while streaming,
+// mirrored client-side so a doomed upload is refused before any byte is sent. The 25 MB
+// request cap needs no separate check here: at most 5 files of at most 5 MB can pass,
+// which totals exactly 25 MB (the boundary the backend's body-limit middleware allows).
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_SUPPLEMENT_FILES = 5;
+const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const IMAGE_ACCEPT = ".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp";
+
+function validateImageBatch(
+  current: File[],
+  incoming: File[]
+): { accepted: File[]; errors: string[] } {
+  const errors: string[] = [];
+  const accepted: File[] = [];
+  for (const file of incoming) {
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      errors.push(`"${file.name}" is not a JPEG, PNG or WEBP image.`);
+      continue;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      errors.push(
+        `"${file.name}" is ${formatBytes(file.size)} — the per-file limit is 5 MB.`
+      );
+      continue;
+    }
+    accepted.push(file);
+  }
+  const room = MAX_SUPPLEMENT_FILES - current.length;
+  if (accepted.length > room) {
+    errors.push(
+      room <= 0
+        ? `At most ${MAX_SUPPLEMENT_FILES} files can be attached per supplement.`
+        : `At most ${MAX_SUPPLEMENT_FILES} files can be attached per supplement — only the first ${room} of these were added.`
+    );
+    if (room <= 0) accepted.length = 0;
+    else accepted.length = room;
+  }
+  return { accepted, errors };
+}
 
 const STATUS_LABELS: Record<OrderIssue["status"], string> = {
   reported: "Reported",
@@ -368,11 +412,11 @@ function RemedyAuthorityTrace({ issue }: { issue: OrderIssue }) {
 }
 
 /**
- * Sprint M3: the supplement loop. When the assessor marked a remedy `needs_review` (or asked
- * for more information outright), the buyer is prompted for exactly what was missing — a photo
- * link and/or a clearer written description — which the backend appends to the issue before
- * the SAME assessment row is re-evaluated. Evidence items are metadata (a URL and words); the
- * backend stores what is sent and authorizes nothing on its own.
+ * Sprint M3 / P3: the supplement loop. When the assessor marked a remedy `needs_review` (or
+ * asked for more information outright), the buyer is prompted for exactly what was missing —
+ * actual image files (JPEG/PNG/WEBP) and/or a clearer written description. Files are uploaded
+ * as multipart parts the backend stores and verifies; nothing is executed by supplying
+ * evidence, and nothing claims to be uploaded until the backend confirms.
  */
 function SupplementEvidenceForm({
   issue,
@@ -384,12 +428,25 @@ function SupplementEvidenceForm({
   onSupplement: (
     issueId: string,
     note: string,
-    evidence: { kind: string; url?: string | null; description?: string | null }[]
+    description: string,
+    files: File[],
+    onUploadProgress?: (fraction: number) => void
   ) => Promise<boolean>;
 }) {
   const [note, setNote] = useState("");
-  const [photoUrl, setPhotoUrl] = useState("");
-  const [evidenceDetail, setEvidenceDetail] = useState("");
+  const [description, setDescription] = useState("");
+  const [selected, setSelected] = useState<{ file: File; previewUrl: string }[]>([]);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [uploadFraction, setUploadFraction] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
+  useEffect(() => {
+    return () => {
+      for (const item of selectedRef.current) URL.revokeObjectURL(item.previewUrl);
+    };
+  }, []);
 
   const needsReviewRemedies = Object.entries(
     issue.assessment?.remedy_eligibility ?? {}
@@ -407,25 +464,58 @@ function SupplementEvidenceForm({
 
   if (!eligible) return null;
 
-  const evidence: { kind: string; url?: string | null; description?: string | null }[] = [];
-  if (photoUrl.trim()) evidence.push({ kind: "photo_url", url: photoUrl.trim() });
-  if (evidenceDetail.trim())
-    evidence.push({ kind: "written_description", description: evidenceDetail.trim() });
-  const canSubmit = !isProcessing && (note.trim().length > 0 || evidence.length > 0);
+  const addFiles = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const { accepted, errors } = validateImageBatch(
+      selected.map((item) => item.file),
+      Array.from(fileList)
+    );
+    setValidationErrors(errors);
+    if (accepted.length > 0) {
+      setSelected((prev) => [
+        ...prev,
+        ...accepted.map((file) => ({ file, previewUrl: URL.createObjectURL(file) })),
+      ]);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const removeFile = (previewUrl: string) => {
+    URL.revokeObjectURL(previewUrl);
+    setSelected((prev) => prev.filter((item) => item.previewUrl !== previewUrl));
+  };
+
+  const hasContent =
+    note.trim().length > 0 || description.trim().length > 0 || selected.length > 0;
+  const canSubmit = !isProcessing && hasContent;
+  const showProgressBar =
+    isProcessing && uploadFraction !== null && uploadFraction < 1;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setUploadFraction(selected.length > 0 ? 0 : null);
+    void onSupplement(
+      issue.issue_id,
+      note.trim(),
+      description.trim(),
+      selected.map((item) => item.file),
+      selected.length > 0 ? (fraction) => setUploadFraction(fraction) : undefined
+    ).then((ok) => {
+      if (ok) {
+        for (const item of selectedRef.current) URL.revokeObjectURL(item.previewUrl);
+        setNote("");
+        setDescription("");
+        setSelected([]);
+        setValidationErrors([]);
+      }
+      setUploadFraction(null);
+    });
+  };
 
   return (
     <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!canSubmit) return;
-        void onSupplement(issue.issue_id, note.trim(), evidence).then((ok) => {
-          if (ok) {
-            setNote("");
-            setPhotoUrl("");
-            setEvidenceDetail("");
-          }
-        });
-      }}
+      onSubmit={handleSubmit}
       className="mt-2.5 rounded-lg border border-status-pending/30 bg-status-pending-soft/40 p-3 text-[11px]"
     >
       <p className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-status-pending">
@@ -436,8 +526,8 @@ function SupplementEvidenceForm({
         {needsReviewRemedies.length > 0
           ? `The eligibility check for ${needsReviewRemedies.join(" and ")} needs more to go on. `
           : "The assessor asked for more information. "}
-        Add a photo link and/or a clearer description below — the issue is re-assessed against
-        the fuller record. Nothing is executed by supplying evidence.
+        Attach photos (JPEG, PNG or WEBP) and/or a clearer description below — the issue is
+        re-assessed against the fuller record. Nothing is executed by supplying evidence.
       </p>
       <textarea
         value={note}
@@ -447,30 +537,95 @@ function SupplementEvidenceForm({
         placeholder="What else can you tell us about this issue?"
         className="mt-2 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
       />
-      <div className="mt-2 grid gap-2 sm:grid-cols-2">
-        <label className="block">
-          <span className="text-text-charcoal/70">Photo link (optional)</span>
-          <input
-            type="url"
-            value={photoUrl}
-            onChange={(e) => setPhotoUrl(e.target.value)}
-            maxLength={500}
-            placeholder="https://…"
-            className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
-          />
-        </label>
-        <label className="block">
-          <span className="text-text-charcoal/70">Evidence description (optional)</span>
-          <input
-            type="text"
-            value={evidenceDetail}
-            onChange={(e) => setEvidenceDetail(e.target.value)}
-            maxLength={500}
-            placeholder="e.g. the box was crushed on arrival"
-            className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
-          />
-        </label>
+      <label className="mt-2 block">
+        <span className="text-text-charcoal/70">Evidence description (optional)</span>
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          maxLength={500}
+          placeholder="e.g. the box was crushed on arrival"
+          className="mt-1 w-full rounded-lg border border-text-charcoal/15 bg-surface px-2.5 py-1.5 text-xs text-text-charcoal placeholder:text-text-charcoal/35 focus:border-accent-terracotta focus:outline-none"
+        />
+      </label>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={IMAGE_ACCEPT}
+          onChange={(e) => addFiles(e.target.files)}
+          className="sr-only"
+          aria-label="Attach photos"
+        />
+        <button
+          type="button"
+          disabled={isProcessing || selected.length >= MAX_SUPPLEMENT_FILES}
+          onClick={() => fileInputRef.current?.click()}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-text-charcoal/20 px-2.5 py-1.5 text-[11px] font-semibold text-text-charcoal/70 transition hover:border-accent-terracotta hover:text-accent-terracotta disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <ImagePlus size={12} />
+          {selected.length >= MAX_SUPPLEMENT_FILES
+            ? `File limit reached (${MAX_SUPPLEMENT_FILES})`
+            : `Attach photos (${selected.length}/${MAX_SUPPLEMENT_FILES})`}
+        </button>
+        <span className="text-text-charcoal/45">
+          JPEG, PNG or WEBP · up to 5 MB each · 5 files / 25 MB per supplement
+        </span>
       </div>
+
+      {selected.length > 0 && (
+        <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+          {selected.map((item) => (
+            <li
+              key={item.previewUrl}
+              className="flex items-center gap-2 rounded-lg border border-text-charcoal/10 bg-surface p-1.5"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- local object URL of the file the buyer just picked */}
+              <img
+                src={item.previewUrl}
+                alt={`Preview of ${item.file.name}`}
+                className="h-10 w-10 shrink-0 rounded-md border border-text-charcoal/10 object-cover"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium text-text-charcoal/80">
+                  {item.file.name}
+                </span>
+                <span className="block text-text-charcoal/50">
+                  {formatBytes(item.file.size)}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => removeFile(item.previewUrl)}
+                disabled={isProcessing}
+                aria-label={`Remove ${item.file.name}`}
+                className="rounded-md p-1 text-text-charcoal/40 transition hover:bg-primary-rose/10 hover:text-primary-rose disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Trash2 size={12} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {validationErrors.length > 0 && (
+        <ul className="mt-2 space-y-0.5 rounded-lg border border-primary-rose/25 bg-primary-rose/10 p-2 text-[11px] font-medium text-primary-rose">
+          {validationErrors.map((message) => (
+            <li key={message}>{message}</li>
+          ))}
+        </ul>
+      )}
+
+      {showProgressBar && (
+        <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-status-info/15">
+          <div
+            className="h-full rounded-full bg-status-info transition-all"
+            style={{ width: `${Math.max(4, Math.round(uploadFraction * 100))}%` }}
+          />
+        </div>
+      )}
+
       <div className="mt-2 flex items-center justify-end">
         <button
           type="submit"
@@ -482,11 +637,123 @@ function SupplementEvidenceForm({
           ) : (
             <ImagePlus size={12} />
           )}
-          {isProcessing ? "Submitting & re-assessing…" : "Submit evidence & re-assess"}
+          {isProcessing && uploadFraction !== null && uploadFraction >= 1
+            ? "Uploaded — re-assessing…"
+            : isProcessing
+              ? "Submitting & re-assessing…"
+              : "Submit evidence & re-assess"}
         </button>
       </div>
     </form>
   );
+}
+
+/**
+ * P3: what is actually attached to an issue. Uploaded files are previewed through the
+ * authenticated retrieval endpoint — the browser's own session fetches the bytes; no
+ * storage key, bucket or credential ever reaches this component. The count is the real
+ * number of evidence items the backend holds for the issue.
+ */
+function IssueEvidenceList({ issue }: { issue: OrderIssue }) {
+  const evidence = issue.evidence ?? [];
+  if (evidence.length === 0) return null;
+  return (
+    <div className="mt-2 rounded-lg border border-text-charcoal/10 bg-surface p-2.5 text-[11px]">
+      <p className="font-semibold uppercase tracking-wider text-text-charcoal/50">
+        Attached evidence ({evidence.length})
+      </p>
+      <ul className="mt-1.5 space-y-1.5">
+        {evidence.map((item, index) => (
+          <EvidenceItemView key={`${index}-${item.display_name ?? item.kind}`} issue={issue} item={item} index={index} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function EvidenceItemView({
+  issue,
+  item,
+  index,
+}: {
+  issue: OrderIssue;
+  item: OrderIssueEvidence;
+  index: number;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (item.kind !== "uploaded_file") return;
+    let revoked = false;
+    let current: string | null = null;
+    setFailed(false);
+    fetchEvidenceObjectUrl(issue.mission_id, issue.issue_id, index)
+      .then((url) => {
+        if (revoked) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        current = url;
+        setObjectUrl(url);
+      })
+      .catch(() => {
+        if (!revoked) setFailed(true);
+      });
+    return () => {
+      revoked = true;
+      if (current) URL.revokeObjectURL(current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- item identity is its position + display fields
+  }, [issue.mission_id, issue.issue_id, index, item.kind, item.display_name, item.size_bytes]);
+
+  if (item.kind === "uploaded_file") {
+    return (
+      <li className="flex items-center gap-2">
+        {objectUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- authenticated blob fetched through the session, not a public asset
+          <img
+            src={objectUrl}
+            alt={item.display_name ?? "Attached evidence"}
+            className="h-10 w-10 shrink-0 rounded-md border border-text-charcoal/10 object-cover"
+          />
+        ) : (
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-text-charcoal/10 bg-neutral-sand/40 text-text-charcoal/40">
+            {failed ? <ImageOff size={14} /> : <Loader2 size={12} className="animate-spin" />}
+          </span>
+        )}
+        <span className="min-w-0">
+          <span className="block truncate font-medium text-text-charcoal/80">
+            {item.display_name ?? "Attached file"}
+          </span>
+          <span className="block text-text-charcoal/50">
+            {formatBytes(item.size_bytes)}
+            {item.mime ? ` · ${item.mime}` : ""}
+            {failed ? " · preview unavailable" : ""}
+          </span>
+        </span>
+      </li>
+    );
+  }
+  if (item.kind === "photo_url" && item.url) {
+    return (
+      <li className="text-text-charcoal/70">
+        Photo link:{" "}
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="break-all text-status-info underline"
+        >
+          {item.url}
+        </a>
+      </li>
+    );
+  }
+  if (item.description) {
+    return <li className="text-text-charcoal/70">&ldquo;{item.description}&rdquo;</li>;
+  }
+  return <li className="text-text-charcoal/50">{item.kind ?? "evidence"}</li>;
 }
 
 interface IssuePanelProps {
@@ -508,11 +775,13 @@ interface IssuePanelProps {
   onResolve: (issueId: string) => Promise<boolean>;
   /** Task 14B.5A: customer opt-out from automated decisions → manual review. */
   onManualReview: (issueId: string) => Promise<boolean>;
-  /** Sprint M3: supplement a needs-review remedy with the evidence the assessor asked for. */
+  /** Sprint M3 / P3: supplement a needs-review remedy — note, description, and image files. */
   onSupplement: (
     issueId: string,
     note: string,
-    evidence: { kind: string; url?: string | null; description?: string | null }[]
+    description: string,
+    files: File[],
+    onUploadProgress?: (fraction: number) => void
   ) => Promise<boolean>;
 }
 
@@ -589,6 +858,15 @@ export function IssuePanel({
         fulfillment information exists for this record.
       </p>
 
+      {/* Backend errors from supplement/assess/report surface here when the report form is closed —
+          otherwise a 413 body-limit refusal would be silently swallowed. */}
+      {error && !formOpen && (
+        <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-primary-rose/20 bg-primary-rose/10 p-3 text-xs font-medium text-primary-rose">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          {error}
+        </div>
+      )}
+
       {issues.length > 0 && (
         <div className="mt-3.5 space-y-2.5">
           {issues.map((issue) => (
@@ -621,6 +899,9 @@ export function IssuePanel({
                 </span>
                 <span className="font-mono">{issue.issue_id}</span>
               </div>
+
+              {/* P3: what the backend actually holds for this issue — real count, real files. */}
+              <IssueEvidenceList issue={issue} />
 
               <IssueAnswersForm
                 issue={issue}

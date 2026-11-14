@@ -119,6 +119,16 @@ app.include_router(ws.router)
 app.include_router(integrations.router)
 
 
+@app.get("/")
+async def root():
+    return {
+        "service": "RESOLVE Backend",
+        "status": "running",
+        "health": "/health",
+        "documentation": "/docs",
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "resolve-backend"}

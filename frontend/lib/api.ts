@@ -2,6 +2,7 @@ import type {
   AgentConversationEvent,
   AuthorityDelegationResponse,
   IntentReceipt,
+  OrderIssue,
   User,
 } from "./types";
 
@@ -190,4 +191,90 @@ export async function getMe(): Promise<User | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Send the buyer's supplement as multipart/form-data — `note`, `description` and one
+ * `files` part per selected image — to the existing supplement endpoint.
+ *
+ * XMLHttpRequest is used instead of fetch for the one thing fetch cannot do: real
+ * upload progress. The multipart Content-Type header is deliberately NEVER set here —
+ * the browser writes it, including the boundary; a hand-set header would break parsing.
+ * The response and the refusal shape (`detail`) are handled exactly like apiRequest.
+ */
+export function supplementIssueMultipart(options: {
+  missionId: string;
+  issueId: string;
+  note: string;
+  description: string;
+  files: File[];
+  onProgress?: (fraction: number) => void;
+}): Promise<OrderIssue> {
+  const { missionId, issueId, note, description, files, onProgress } = options;
+  const form = new FormData();
+  if (note) form.append("note", note);
+  if (description) form.append("description", description);
+  for (const file of files) form.append("files", file);
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `${API_URL}/missions/${missionId}/order/issues/${issueId}/supplement`
+    );
+    xhr.withCredentials = true;
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress && event.total > 0) {
+        onProgress(event.loaded / event.total);
+      }
+    };
+    xhr.onload = () => {
+      const data = xhr.response as { detail?: unknown } | null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data as unknown as OrderIssue);
+        return;
+      }
+      reject(
+        new ApiError(
+          typeof data?.detail === "string"
+            ? data.detail
+            : `The server refused this request (${xhr.status}).`,
+          xhr.status
+        )
+      );
+    };
+    xhr.onerror = () =>
+      reject(new ApiError("The upload could not reach the server.", 0));
+    xhr.send(form);
+  });
+}
+
+/**
+ * Fetch one stored evidence file through the authenticated retrieval endpoint and
+ * hand back a local object URL for an <img>. The bytes pass through the browser's
+ * session — no storage key, bucket or credential is ever involved, and the caller
+ * revokes the URL when the preview goes away.
+ */
+export async function fetchEvidenceObjectUrl(
+  missionId: string,
+  issueId: string,
+  index: number
+): Promise<string> {
+  const res = await fetch(
+    `${API_URL}/missions/${missionId}/order/issues/${issueId}/evidence/${index}`,
+    { credentials: "include", cache: "no-store" }
+  );
+  if (!res.ok) {
+    let detail = `The server refused this request (${res.status}).`;
+    try {
+      const data = (await res.json()) as { detail?: unknown } | null;
+      if (typeof data?.detail === "string") detail = data.detail;
+    } catch {
+      // non-JSON refusal body — keep the generic status text
+    }
+    throw new ApiError(detail, res.status);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }

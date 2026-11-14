@@ -341,7 +341,7 @@ export interface OrderIssue {
     | "resolution_pending"
     | "replacement_requested"
   | "return_requested";
-  evidence?: { kind?: string; url?: string | null; description?: string | null }[];
+  evidence?: OrderIssueEvidence[];
   /** M22 §2: the deterministic per-category intake questions, with the buyer's recorded answers. */
   questions?: { question_id: string; prompt: string }[];
   answers?: Record<string, string>;
@@ -368,6 +368,22 @@ export interface OrderIssue {
   };
   resolution_note?: string;
   agent_message?: string | null;
+}
+
+/**
+ * One item attached to an issue. Client-supplied items carry metadata about EXTERNAL
+ * artifacts (a link or words); upload-backed items are named, typed and sized by the
+ * backend after it has stored and verified the bytes — the payload the browser receives
+ * never contains storage keys, bucket names or digests.
+ */
+export interface OrderIssueEvidence {
+  kind?: string;
+  url?: string | null;
+  description?: string | null;
+  collected_at?: string | null;
+  display_name?: string | null;
+  mime?: string | null;
+  size_bytes?: number | null;
 }
 
 export interface OrderIssueListResponse {

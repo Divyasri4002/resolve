@@ -164,14 +164,22 @@ async def test_multipart_upload_stores_actual_bytes_and_persists_metadata(
         assert first["display_name"] == "photo.jpg"
         assert first["mime"] == "image/jpeg"
         assert first["size_bytes"] == len(JPEG_BYTES)
-        assert first["sha256"] == hashlib.sha256(JPEG_BYTES).hexdigest()
-        assert _KEY_SHAPE.match(first["storage_key"])
-        assert first["bucket"] == fake.bucket
         assert issue["evidence"][1]["mime"] == "image/png"
 
-        # Actual bytes: the store holds the EXACT upload, keyed as recorded, typed by
-        # the SNIFFED signature.
-        assert fake.objects[first["storage_key"]] == (JPEG_BYTES, "image/jpeg")
+        # The client-facing payload never carries storage handles — the browser sees
+        # WHAT was attached, never where it lives.
+        for item in issue["evidence"]:
+            for forbidden in ("storage_key", "bucket", "sha256"):
+                assert forbidden not in item
+
+        # Storage truth lives in the persisted row: the store holds the EXACT upload,
+        # keyed as recorded, typed by the SNIFFED signature.
+        row = await _issue_row(test_session, issue_id)
+        row_first = row.evidence[0]
+        assert row_first["sha256"] == hashlib.sha256(JPEG_BYTES).hexdigest()
+        assert _KEY_SHAPE.match(row_first["storage_key"])
+        assert row_first["bucket"] == fake.bucket
+        assert fake.objects[row_first["storage_key"]] == (JPEG_BYTES, "image/jpeg")
 
         # The audit names exactly what arrived — the number the UI reports.
         audits = await _audits(test_session, mission_id)
@@ -605,6 +613,44 @@ async def test_reassessment_context_receives_compact_upload_metadata(
                 .where(ResolutionAssessmentRecord.issue_id == issue_id)
             )
         assert count == 1
+
+
+# --------------------------------------------------------------------------- #
+# P3: client-facing issue payloads carry WHAT was attached, never WHERE it lives
+# --------------------------------------------------------------------------- #
+async def test_client_facing_issue_payloads_never_carry_storage_handles(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    install_fake_store()
+    async with client:
+        mission_id, issue_id = await _needs_review_issue(client, mission_setup, install_fake_reasoning)
+        resp = await _supplement_multipart(
+            client,
+            mission_id,
+            issue_id,
+            note="Photo attached.",
+            description="The torn seam, close up.",
+            files=[("photo.jpg", JPEG_BYTES, "image/jpeg")],
+        )
+        assert resp.status_code == 200, resp.text
+        listed = await client.get(f"/missions/{mission_id}/order/issues")
+        assert listed.status_code == 200, listed.text
+
+        for payload_issue in listed.json()["issues"]:
+            for item in payload_issue["evidence"]:
+                for forbidden in ("storage_key", "bucket", "sha256"):
+                    assert forbidden not in item
+        for item in resp.json()["evidence"]:
+            for forbidden in ("storage_key", "bucket", "sha256"):
+                assert forbidden not in item
+
+        # The persisted row keeps the handles the retrieval endpoint reads server-side.
+        row = await _issue_row(test_session, issue_id)
+        [uploaded] = [e for e in row.evidence if e["kind"] == "uploaded_file"]
+        assert uploaded["storage_key"] and uploaded["bucket"]
 
 
 # --------------------------------------------------------------------------- #

@@ -60,3 +60,21 @@ export function missionStatusLabel(status: MissionStatus | null | undefined): st
   if (!status) return "Unknown";
   return MISSION_STATUS_LABELS[status] ?? status.replace(/_/g, " ");
 }
+
+/**
+ * A byte count the way a person reads it — used for upload limits and attached-file sizes.
+ * Values under a kilobyte stay exact; larger values round to one decimal in the largest
+ * unit that keeps them above 1.
+ */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = -1;
+  do {
+    value /= 1024;
+    unitIndex += 1;
+  } while (value >= 1024 && unitIndex < units.length - 1);
+  return `${value >= 10 || Number.isInteger(value) ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
