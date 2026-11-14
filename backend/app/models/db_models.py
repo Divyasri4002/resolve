@@ -335,6 +335,16 @@ class RefundRecord(Base):
     error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Submission lease (mirrors purchase_authorizations): 'idle'/'in_flight'. While in_flight,
+    # one executor owns the provider-call window for this row — a concurrent executor for the
+    # SAME issue must not run its own create behind it (two creates for one issue would both
+    # consume provider balance). Rows predating the column are 'idle' by the default backfill.
+    submission_state: Mapped[str] = mapped_column(
+        String(16), default="idle", server_default="idle"
+    )
+    submission_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    submission_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

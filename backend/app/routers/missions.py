@@ -18,7 +18,7 @@ from starlette.datastructures import UploadFile
 from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3848,6 +3848,20 @@ async def _load_refund(db: AsyncSession, issue_id: str) -> RefundRecord | None:
     return result.scalar_one_or_none()
 
 
+def _payment_amount_paise(payment_data: dict) -> int:
+    """The canonical PAID amount in integer paise, read from the persisted payment record."""
+    amount = Decimal(str(payment_data["amount"]))
+    raw_paise = payment_data.get("amount_paise")
+    if raw_paise is None:
+        return int((amount * 100).quantize(Decimal("1"), ROUND_HALF_UP))
+    return int(raw_paise)
+
+
+def _order_amount_paise(order: ResolveOrderRecord) -> int:
+    """The canonical ORDERED amount in integer paise, from the persisted order record."""
+    return int((Decimal(str(order.amount)) * 100).quantize(Decimal("1"), ROUND_HALF_UP))
+
+
 def _canonical_refund_amount(payment_data: dict, order: ResolveOrderRecord) -> tuple[Decimal, int, str]:
     """
     Refund amount safety: everything comes from the canonical persisted records.
@@ -3855,16 +3869,7 @@ def _canonical_refund_amount(payment_data: dict, order: ResolveOrderRecord) -> t
     Rupees as Decimal, minor units as integer paise — never floats. The refund can never
     exceed the canonical order amount, whichever of the two persisted records is smaller.
     """
-    amount = Decimal(str(payment_data["amount"]))
-    raw_paise = payment_data.get("amount_paise")
-    if raw_paise is None:
-        paise = int((amount * 100).quantize(Decimal("1"), ROUND_HALF_UP))
-    else:
-        paise = int(raw_paise)
-    order_paise = int(
-        (Decimal(str(order.amount)) * 100).quantize(Decimal("1"), ROUND_HALF_UP)
-    )
-    paise = min(paise, order_paise)  # canonical cross-check: never refund more than paid
+    paise = min(_payment_amount_paise(payment_data), _order_amount_paise(order))
     amount = (Decimal(paise) / 100).quantize(Decimal("0.01"))
     currency = str(payment_data.get("currency") or order.currency or "INR").upper()
     return amount, paise, currency
@@ -3894,6 +3899,152 @@ def _settle_refund_from_provider(refund: RefundRecord, provider_status: str | No
     else:
         refund.status = RefundStatus.PENDING.value
         refund.verified_at = None
+
+
+# PP Phase 2 — payment-level cumulative refund accounting.
+#
+# Advisory-lock namespace 11 is refund accounting's own: single-key advisory locks elsewhere
+# in this codebase use crc32(mission_id), and the ledger's fixed pair is (7, 1). A two-int
+# key can never collide with a single-int key, and 11 != 7, so no two subsystems can ever
+# hold the same lock.
+_REFUND_ACCOUNTING_LOCK_NAMESPACE = 11
+
+
+def _refund_reserves_balance(row: RefundRecord) -> bool:
+    """Whether this refund row may still consume provider balance (conservative).
+
+    Released ONLY on established outcomes: verified (definitively consumed) or a
+    provider-confirmed failure (definitively dead). A pending row is unknown. A failed
+    row whose provider status was never confirmed 'failed' may have landed at the
+    provider despite the error — the create call's error response is never proof of
+    what did NOT happen. Every unknown stays reserved against the payment.
+    """
+    if row.status == RefundStatus.VERIFIED.value:
+        return True
+    if row.status == RefundStatus.FAILED.value:
+        return row.provider_status != "failed"
+    return True
+
+
+def _refund_attempt_will_create(refund: RefundRecord | None) -> bool:
+    """Whether the executor would call create_payment_refund for this refund state.
+
+    A row with a provider id is re-checked or settled, never re-created — except a
+    provider-confirmed failure, which is dead at the provider and retried as a NEW
+    provider refund through the same row (the old attempt consumed nothing).
+    """
+    if refund is None:
+        return True
+    if refund.razorpay_refund_id is None:
+        return True
+    return refund.status == RefundStatus.FAILED.value and refund.provider_status == "failed"
+
+
+async def _lock_refund_accounting(db: AsyncSession, payment_id: str) -> None:
+    """Serialize cumulative-refund accounting per payment across concurrent executors.
+
+    pg_advisory_xact_lock(11, hashtext(payment_id)) is held from the reserved-sum read
+    through the claim/lease commit: two executors for the same payment cannot both read
+    "available" against a reservation the other is about to write. Transaction-scoped —
+    released by the next commit/rollback. SQLite (the hermetic dialect) has no such lock
+    and no second writer; the real guarantee is proven by the PostgreSQL concurrency
+    tests, which this guard deliberately skips to.
+    """
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, hashtext(:pid))"),
+        {"ns": _REFUND_ACCOUNTING_LOCK_NAMESPACE, "pid": payment_id},
+    )
+
+
+async def _list_provider_refunds_safely(payment_id: str) -> tuple[list[dict], str | None]:
+    """One provider listing per create-capable run, serving BOTH crash-window adoption
+    (matching by notes.resolve_refund_id) and provider-side reconciliation (counting
+    refunds no local row knows about). Failure is honest: returns an empty listing plus
+    a note the caller persists — accounting then proceeds on local state alone, which
+    never fabricates provider-side facts. Same-issue duplicate-create races are still
+    closed by the submission lease; a list failure does not widen that window.
+    """
+    try:
+        return list_refunds_for_payment(payment_id), None
+    except Exception as exc:
+        return [], f"provider refund listing failed: {_provider_error_text(exc)}"
+
+
+def _unattributed_provider_paise(provider_items: list[dict], rows: list[RefundRecord]) -> int:
+    """Sum of provider refunds no local row knows about, in integer paise.
+
+    An item counts unless it is failed (consumed nothing) or a local row claims it — by
+    notes.resolve_refund_id (our create pins this) or by provider refund id (adoption).
+    Unknown provider-side money is treated as already spent: never double-counted, and
+    never assumed away.
+    """
+    local_refund_ids = {r.refund_id for r in rows}
+    local_provider_ids = {r.razorpay_refund_id for r in rows if r.razorpay_refund_id}
+    total = 0
+    for item in provider_items:
+        if item.get("status") == "failed":
+            continue
+        if (item.get("notes") or {}).get("resolve_refund_id") in local_refund_ids:
+            continue
+        if item.get("id") in local_provider_ids:
+            continue
+        total += int(item.get("amount") or 0)
+    return total
+
+
+async def _take_refund_submission_lease(db: AsyncSession, refund_id: str, token: str) -> bool:
+    """Atomically claim the provider-call window on an EXISTING row (idle -> in_flight).
+
+    One conditional UPDATE decides the single owner; commits before returning so the
+    ownership is visible to every concurrent request before any provider call is made.
+    Returns False when another owner holds the window.
+    """
+    result = await db.execute(
+        update(RefundRecord)
+        .where(
+            RefundRecord.refund_id == refund_id,
+            RefundRecord.submission_state == SUBMISSION_IDLE,
+        )
+        .values(
+            submission_state=SUBMISSION_IN_FLIGHT,
+            submission_owner=token,
+            submission_claimed_at=datetime.utcnow(),
+        )
+    )
+    await db.commit()
+    return result.rowcount == 1
+
+
+async def _recover_stale_refund_lease(db: AsyncSession, refund: RefundRecord) -> bool:
+    """Release a dead owner's lease after the staleness bound.
+
+    A LIVE owner's create call may still be in flight at the provider, so a lease
+    younger than the bound is never stolen — the caller refuses with 409 instead.
+    claimed_at None (a legacy row mid-window) is treated as stale: no honest wait bound
+    exists for it. Matches only the row the recorded owner still holds, so a live owner
+    can never be released by a racer. Returns True when this call performed the release.
+    """
+    if refund.submission_state != SUBMISSION_IN_FLIGHT:
+        return False
+    if (
+        refund.submission_claimed_at is not None
+        and datetime.utcnow() - refund.submission_claimed_at
+        < timedelta(seconds=_LEASE_STALE_AFTER_SECONDS)
+    ):
+        return False
+    result = await db.execute(
+        update(RefundRecord)
+        .where(
+            RefundRecord.refund_id == refund.refund_id,
+            RefundRecord.submission_state == SUBMISSION_IN_FLIGHT,
+            RefundRecord.submission_owner == refund.submission_owner,
+        )
+        .values(submission_state=SUBMISSION_IDLE, submission_owner=None)
+    )
+    await db.commit()
+    return result.rowcount == 1
 
 
 def _refund_response(
@@ -4069,6 +4220,16 @@ async def run_refund_executor(
     no provider call; a pending refund is re-checked at the provider instead of re-created;
     a failed refund is retried through the SAME row; and unique(issue_id) makes a second
     refund row for one issue impossible at the storage level.
+
+    Cumulative financial integrity (PP Phase 2): before any create-capable attempt the
+    executor takes the per-payment advisory lock, adopts any orphaned provider refund for
+    this row by its claim notes, and reconciles the payment's refund ceiling against BOTH
+    local rows and provider-side refunds no local row knows about — the provider is never
+    the only guard against over-refunding. A per-row submission lease (mirroring
+    purchase_authorizations) keeps at most one provider-call window per refund row; a
+    stale lease is recovered after the bound, a live one refuses with 409. The claim is
+    committed before the provider call, so a concurrent executor's accounting already
+    sees the money before the provider ever moves it.
     """
     record = await _load_mission_for_shopping_action(mission_id, current_user, db)
     order = await _load_order(db, mission_id)
@@ -4148,36 +4309,186 @@ async def run_refund_executor(
             ),
         )
 
-    existing = await _load_refund(db, issue_id)
-    if existing is not None and existing.status == RefundStatus.VERIFIED.value:
+    def _already_verified_response(row: RefundRecord) -> dict:
         return _refund_response(
-            existing,
+            row,
             agent_message=(
-                f"Refund {existing.refund_id} was already verified "
-                f"({existing.razorpay_refund_id}) — no new refund was created."
+                f"Refund {row.refund_id} was already verified "
+                f"({row.razorpay_refund_id}) — no new refund was created."
             ),
             already_existed=True,
         )
 
+    existing = await _load_refund(db, issue_id)
+    if existing is not None and existing.status == RefundStatus.VERIFIED.value:
+        return _already_verified_response(existing)
+
     refund = existing
-    newly_claimed = False
+    payment_id = payment_data["razorpay_payment_id"]
+    payment_ceiling_paise = _payment_amount_paise(payment_data)
+    token = uuid.uuid4().hex
+
+    local_reserved: int | None = None
+    unattributed: int | None = None
+    reconciliation_note: str | None = None
+
+    # --- Cumulative payment-level accounting (only before a create-capable attempt) ---
+    if _refund_attempt_will_create(refund):
+        # Serialized per payment: the advisory lock is held from the reserved-sum read
+        # through the claim/lease commit below, so two executors for the same payment can
+        # never both read "available" against a reservation the other is about to write.
+        await _lock_refund_accounting(db, payment_id)
+
+        fresh = await _load_refund(db, issue_id)
+        if fresh is not None and fresh.status == RefundStatus.VERIFIED.value:
+            await db.commit()  # releases the advisory lock
+            return _already_verified_response(fresh)
+
+        provider_items, reconciliation_note = await _list_provider_refunds_safely(payment_id)
+
+        if refund is not None and refund.razorpay_refund_id is None:
+            # A PREVIOUS attempt may have landed at the provider without its id being
+            # persisted (the create response was lost after the provider accepted it).
+            # Our claim is carried in the refund's notes — adopt it rather than issue a
+            # second refund. A failed listing leaves this untouched, and the check below
+            # then refuses the create instead of risking a duplicate.
+            for item in provider_items:
+                if (item.get("notes") or {}).get("resolve_refund_id") == refund.refund_id:
+                    refund.razorpay_refund_id = str(item.get("id") or "") or None
+                    refund.provider_status = str(item.get("status") or "") or None
+                    break
+
+        rows_result = await db.execute(
+            select(RefundRecord).where(RefundRecord.razorpay_payment_id == payment_id)
+        )
+        rows = list(rows_result.scalars().all())
+        local_reserved = sum(
+            (row.amount_paise or 0)
+            for row in rows
+            if row.issue_id != issue_id and _refund_reserves_balance(row)
+        )
+        unattributed = _unattributed_provider_paise(provider_items, rows)
+        available_paise = payment_ceiling_paise - local_reserved - unattributed
+
+        will_create = _refund_attempt_will_create(refund)
+        if will_create and amount_paise > available_paise:
+            await audit.append(
+                db, mission_id, "buyer_agent", gate,
+                note=(
+                    f"refund refused for issue {issue_id}: requested {amount_paise} paise "
+                    f"exceeds the {available_paise} paise still refundable on payment "
+                    f"{payment_id} (ceiling {payment_ceiling_paise}, local reserved "
+                    f"{local_reserved}, provider unattributed {unattributed})"
+                ),
+            )
+            await db.commit()  # releases the advisory lock
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Refund refused: {amount_paise} paise requested but only "
+                    f"{available_paise} paise of the {payment_ceiling_paise} paise paid "
+                    f"remains refundable (reserved locally: {local_reserved}, provider-side "
+                    f"unattributed: {unattributed}). Cumulative refunds can never exceed "
+                    "what was actually paid."
+                ),
+            )
+
+        if (
+            will_create
+            and refund is not None
+            and refund.razorpay_refund_id is None
+            and reconciliation_note is not None
+        ):
+            # Fail closed on an ambiguous prior attempt: the row has no provider id and
+            # the listing that would prove the prior create never landed is unavailable.
+            # A blind create here is exactly the duplicate-refund window.
+            await audit.append(
+                db, mission_id, "buyer_agent", gate,
+                note=(
+                    f"refund {refund.refund_id} create refused: provider listing "
+                    f"unavailable while the row has no provider id ({reconciliation_note})"
+                ),
+            )
+            await db.commit()  # releases the advisory lock
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The provider refund listing is unavailable while a previous attempt "
+                    f"for refund {refund.refund_id} is unresolved; whether it reached the "
+                    "provider is unknown, so no second refund is created. Retry once the "
+                    "provider is reachable."
+                ),
+            )
+
+    # --- Claim the row, then the provider-call window (one owner at a time) ---
+    owns_window = False
     if refund is None:
         # Persist the claim BEFORE touching the provider: unique(issue_id) then makes any
-        # concurrent/repeated attempt resolve to this row instead of issuing a second refund.
+        # concurrent/repeated attempt resolve to this row instead of issuing a second
+        # refund, and the lease columns mark this row's provider window as ours from
+        # birth. The committed claim is what the next executor's accounting sees — the
+        # reservation exists before the provider call, not after it.
         refund = RefundRecord(
             issue_id=issue_id,
             mission_id=mission_id,
             order_id=order.order_id,
             user_id=record.user_id,
-            razorpay_payment_id=payment_data["razorpay_payment_id"],
+            razorpay_payment_id=payment_id,
             amount=amount,
             amount_paise=amount_paise,
             currency=currency,
             status=RefundStatus.PENDING.value,
+            submission_state=SUBMISSION_IN_FLIGHT,
+            submission_owner=token,
+            submission_claimed_at=datetime.utcnow(),
         )
         db.add(refund)
-        await db.commit()
-        newly_claimed = True
+        try:
+            await db.commit()  # claim + advisory lock released together
+            owns_window = True
+        except IntegrityError:
+            # The database constraint is the final arbiter: a concurrent request for this
+            # issue committed its claim first. Roll back, adopt the winner's row — never
+            # start a second provider flow for the same issue.
+            await db.rollback()
+            await db.refresh(issue)
+            refund = await _load_refund(db, issue_id)
+            if refund is None:
+                await db.commit()
+                raise HTTPException(
+                    status_code=409,
+                    detail="A concurrent refund claim could not be resolved; retry.",
+                )
+
+    if not owns_window:
+        await db.refresh(refund)
+        if refund.submission_state == SUBMISSION_IN_FLIGHT:
+            if not await _recover_stale_refund_lease(db, refund):
+                await db.commit()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Another refund execution for issue {issue_id} is in flight; "
+                        "retry in a moment."
+                    ),
+                )
+            await db.refresh(refund)
+        if not await _take_refund_submission_lease(db, refund.refund_id, token):
+            # Lost the lease race to a live executor — or the winner already settled.
+            await db.refresh(refund)
+            if refund.status != RefundStatus.VERIFIED.value:
+                await db.commit()
+                raise HTTPException(
+                    status_code=409,
+                    detail="A concurrent refund execution could not be resolved; retry.",
+                )
+        else:
+            await db.refresh(refund)
+        if refund.status == RefundStatus.VERIFIED.value:
+            refund.submission_state = SUBMISSION_IDLE
+            refund.submission_owner = None
+            await db.commit()
+            return _already_verified_response(refund)
 
     status_changed_event: str | None = None
 
@@ -4198,6 +4509,8 @@ async def run_refund_executor(
             refund.status = RefundStatus.FAILED.value
             refund.error_reason = "Refund execution is restricted to Razorpay TEST mode"
             status_changed_event = RefundStatus.FAILED.value
+            refund.submission_state = SUBMISSION_IDLE
+            refund.submission_owner = None
             await audit.append(
                 db, mission_id, "buyer_agent", gate,
                 note=f"refund {refund.refund_id} blocked: non-test Razorpay credentials",
@@ -4205,21 +4518,11 @@ async def run_refund_executor(
             await db.commit()
             raise HTTPException(status_code=400, detail=refund.error_reason)
 
-        if refund.razorpay_refund_id is None and not newly_claimed:
-            # A PREVIOUS attempt may have created the refund without its id being persisted.
-            # Our claim is carried in the refund's notes — adopt it rather than issue a
-            # second refund. (Best-effort: listing failures fall through to a create, which
-            # then either succeeds visibly for us or fails on the provider's side.)
-            try:
-                for item in list_refunds_for_payment(refund.razorpay_payment_id):
-                    if (item.get("notes") or {}).get("resolve_refund_id") == refund.refund_id:
-                        refund.razorpay_refund_id = str(item.get("id") or "") or None
-                        refund.provider_status = str(item.get("status") or "") or None
-                        break
-            except Exception:
-                pass
-
-        if refund.razorpay_refund_id is None:
+        if refund.razorpay_refund_id is None or refund.provider_status == "failed":
+            # No live provider refund exists for this row: first attempt, an ambiguous
+            # failure, or a provider-confirmed failure retried as a NEW provider refund
+            # through the same row. The cumulative ceiling was enforced above under the
+            # per-payment lock.
             try:
                 created = create_payment_refund(
                     refund.razorpay_payment_id, refund.amount_paise, refund.refund_id
@@ -4232,6 +4535,8 @@ async def run_refund_executor(
                 refund.status = RefundStatus.FAILED.value
                 refund.error_reason = _provider_error_text(exc)
                 status_changed_event = RefundStatus.FAILED.value
+                refund.submission_state = SUBMISSION_IDLE
+                refund.submission_owner = None
                 await audit.append(
                     db, mission_id, "buyer_agent", gate,
                     note=f"refund {refund.refund_id} provider call failed: {refund.error_reason}",
@@ -4257,12 +4562,29 @@ async def run_refund_executor(
     if refund.status == RefundStatus.VERIFIED.value:
         issue.status = IssueStatus.RESOLUTION_PENDING.value
 
+    # The provider-call window ends here regardless of outcome: the row's next executor
+    # takes a fresh lease. The claim (and its notes key) persist — adoption and
+    # cumulative accounting both resolve through it.
+    refund.submission_state = SUBMISSION_IDLE
+    refund.submission_owner = None
+
+    accounting_note = ""
+    if local_reserved is not None:
+        accounting_note = (
+            f" payment_ceiling={payment_ceiling_paise}"
+            f" payment_reserved={local_reserved}"
+            f" provider_unattributed={unattributed}"
+        )
+    if reconciliation_note:
+        accounting_note += f" [{reconciliation_note}]"
+
     await audit.append(
         db, mission_id, "buyer_agent", gate,
         note=(
             f"refund {refund.refund_id}: razorpay_refund_id={refund.razorpay_refund_id} "
             f"amount={refund.amount} {refund.currency} status={refund.status} "
             f"provider_status={refund.provider_status} refund_ceiling={refund_ceiling(authority)}"
+            f"{accounting_note}"
         ),
     )
     await db.commit()

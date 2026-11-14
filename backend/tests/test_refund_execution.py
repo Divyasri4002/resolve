@@ -343,8 +343,10 @@ async def test_allowed_refund_executes_and_verifies(
         assert data["verified_at"] and data["test_mode"] is True
         assert "TEST-mode provider refund" in data["agent_message"]
 
-        # Exactly one create + one verification fetch, carrying the claim notes
-        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 0}
+        # Exactly one create + one verification fetch, carrying the claim notes.
+        # The provider listing (PP Phase 2) runs once per create-capable attempt for
+        # crash-window adoption + reconciliation.
+        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 1}
         # Verification is a per-payment lookup: the canonical payment id, not a guess.
         assert refund_api.fetch_calls == [("pay_TESTORDER1", "rfnd_TEST1")]
         # The canonical captured amount is what the provider is asked to refund.
@@ -1011,7 +1013,7 @@ async def test_refund_executes_when_assessment_proposed_replacement(
         data = resp.json()
         assert data["status"] == "verified"
         assert data["amount_paise"] == 39900
-        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 0}
+        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 1}
 
         issues = (await client.get(f"/missions/{mission_id}/order/issues")).json()["issues"]
         assert issues[0]["refund"]["status"] == "verified"

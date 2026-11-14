@@ -87,6 +87,14 @@ _SCHEMA_UPGRADES: dict[str, tuple[tuple[str, str], ...]] = {
         ("submission_state", "submission_state VARCHAR(16) NOT NULL DEFAULT 'idle'"),
         ("submission_owner", "submission_owner VARCHAR(64)"),
     ),
+    # PP Phase 2: the refund submission lease (same contract as purchase_authorizations).
+    # 'idle' is the honest backfill for every pre-existing row; an owner is only named while
+    # a provider-call window is in flight.
+    "refunds": (
+        ("submission_state", "submission_state VARCHAR(16) NOT NULL DEFAULT 'idle'"),
+        ("submission_owner", "submission_owner VARCHAR(64)"),
+        ("submission_claimed_at", "submission_claimed_at TIMESTAMP"),
+    ),
     # Buildathon sprint M3: the assessor's independent per-remedy eligibility verdicts
     # (Layer A). Nullable — an assessment row from before this contract has no verdicts,
     # and the client must show "not evaluated" for it, never infer eligibility.
@@ -227,6 +235,8 @@ async def init_models() -> None:
                     "purchase_authorizations",
                     _SCHEMA_UPGRADES["purchase_authorizations"],
                 )
+            if "refunds" in inspector.get_table_names():
+                _add_missing(sync_conn, inspector, "refunds", _SCHEMA_UPGRADES["refunds"])
             if "resolution_assessments" in inspector.get_table_names():
                 _add_missing(
                     sync_conn,

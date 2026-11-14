@@ -249,7 +249,7 @@ async def test_refund_allow_denied_and_terminal_idempotency(
         assert data["provider_reference"] == "rfnd_TEST1"
         assert data["executor_record_id"] == data["execution"]["refund_id"]
         assert data["execution"]["amount_paise"] == 39900  # canonical amount, never client data
-        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 0}
+        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 1}
         assert (await _get_issue(client, mission_id, issue_id))["status"] == "resolution_pending"
 
         # Terminal short-circuit: a repeat returns the persisted resolution, zero provider use.
@@ -259,7 +259,7 @@ async def test_refund_allow_denied_and_terminal_idempotency(
         assert second["already_existed"] is True
         assert second["resolution_id"] == data["resolution_id"]
         assert "already resolved as verified" in second["message"]
-        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 0}
+        assert refund_api.calls == {"create": 1, "fetch": 1, "list": 1}
         rows = await _resolutions(test_session, mission_id)
         assert len(rows) == 2  # the denied attempt + this issue: one row each, never more
         assert {r.resolution_state for r in rows} == {"denied", "verified"}
