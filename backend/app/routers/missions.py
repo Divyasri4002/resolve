@@ -69,6 +69,7 @@ from app.evidence_store import (
     EvidenceValidationError,
     IncomingEvidence,
     ObjectNotFound,
+    ObjectStoreError,
     ServerError,
     StoredEvidence,
     TransportFailure,
@@ -3087,6 +3088,7 @@ async def supplement_issue_evidence(
             detail="A supplement needs a note or at least one evidence item",
         )
 
+    stored: list[StoredEvidence] = []
     if pending_uploads:
         if store is None:
             raise HTTPException(
@@ -3113,26 +3115,68 @@ async def supplement_issue_evidence(
             for (filename, _), st in zip(pending_uploads, stored)
         ]
 
-    if note:
-        issue.description = f"{issue.description}\n\nSupplement: {note[:800]}"[:2000]
-    if evidence_items:
-        issue.evidence = list(issue.evidence or []) + evidence_items
-    issue.status = IssueStatus.REPORTED.value
-    issue.updated_at = datetime.utcnow()
-    await audit.append_event(
-        db,
-        mission_id=mission_id,
-        actor="user",
-        action="issue_evidence_supplemented",
-        recorded=True,
-        reason=(
-            f"buyer supplemented issue {issue.issue_id} after its assessment asked for more "
-            f"({len(evidence_items)} evidence item(s), note={'provided' if note else 'none'}); the "
-            "issue returns to 'reported' so the next assessment re-evaluates the same record — "
-            "the supplement authorizes nothing"
-        ),
-    )
-    await db.commit()
+    try:
+        if note:
+            issue.description = f"{issue.description}\n\nSupplement: {note[:800]}"[:2000]
+        if evidence_items:
+            issue.evidence = list(issue.evidence or []) + evidence_items
+        issue.status = IssueStatus.REPORTED.value
+        issue.updated_at = datetime.utcnow()
+        await audit.append_event(
+            db,
+            mission_id=mission_id,
+            actor="user",
+            action="issue_evidence_supplemented",
+            recorded=True,
+            reason=(
+                f"buyer supplemented issue {issue.issue_id} after its assessment asked for more "
+                f"({len(evidence_items)} evidence item(s), note={'provided' if note else 'none'}); the "
+                "issue returns to 'reported' so the next assessment re-evaluates the same record — "
+                "the supplement authorizes nothing"
+            ),
+        )
+        await db.commit()
+    except Exception:
+        # Metadata persistence failed AFTER the bytes were stored. Compensate: roll
+        # the issue mutations back and delete the just-stored objects so no bytes are
+        # orphaned without a record and a retry starts from a clean slate. When a
+        # deletion cannot be confirmed, the object is durably tracked for
+        # reconciliation exactly like a mid-batch failure — never silently assumed
+        # gone.
+        await db.rollback()
+        unconfirmed: list[StoredEvidence] = []
+        if stored and store is not None:
+            for rec in stored:
+                try:
+                    await store._client.delete_object(rec.storage_key)
+                except ObjectStoreError:
+                    unconfirmed.append(rec)
+        if unconfirmed:
+            try:
+                await audit.append_event(
+                    db,
+                    mission_id=mission_id,
+                    actor="system",
+                    action="evidence_orphan_tracked",
+                    recorded=True,
+                    reason=(
+                        f"metadata persistence failed after storing {len(unconfirmed)} "
+                        f"object(s) for issue {issue_id}; their deletion could not be "
+                        "confirmed and they await reconciliation — nothing was attached "
+                        "to the issue"
+                    ),
+                )
+                await db.commit()
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The supplement could not be recorded — the issue was left unchanged"
+                + (" and the uploaded bytes were removed" if stored else "")
+                + ". You can retry safely."
+            ),
+        ) from None
     return _issue_response(issue, remedy_authority=_remedy_authority(record, order))
 
 

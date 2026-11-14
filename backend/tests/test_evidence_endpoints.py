@@ -693,3 +693,89 @@ async def test_malformed_json_body_is_a_422_not_a_crash(
             headers={"content-type": "application/json"},
         )
         assert resp.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Metadata-persistence failure AFTER the bytes were stored: compensating cleanup
+# removes the stored objects, the issue record survives untouched, and the same
+# supplement can be retried safely from a clean slate.
+# --------------------------------------------------------------------------- #
+async def test_commit_failure_after_storage_compensates_and_allows_safe_retry(
+    restart_env, install_mock_discovery, sample_products, mock_razorpay,
+    install_fake_reasoning, monkeypatch,
+):
+    client, test_session, mission_setup = await _setup(
+        restart_env, install_mock_discovery, sample_products, mock_razorpay, install_fake_reasoning
+    )
+    fake = install_fake_store()
+    async with client:
+        mission_id, issue_id = await _needs_review_issue(client, mission_setup, install_fake_reasoning)
+        before = await _issue_row(test_session, issue_id)
+        before_status = before.status
+        before_evidence = list(before.evidence or [])
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        real_commit = AsyncSession.commit
+
+        async def _exploding_commit(self):
+            raise RuntimeError("forced metadata-persistence failure")
+
+        monkeypatch.setattr(AsyncSession, "commit", _exploding_commit)
+        resp = await _supplement_multipart(
+            client,
+            mission_id,
+            issue_id,
+            note="A photo of the damaged unit.",
+            files=[("photo.jpg", JPEG_BYTES, "image/jpeg")],
+        )
+        assert resp.status_code == 502, resp.text
+        detail = resp.json()["detail"]
+        assert "retry safely" in detail
+        assert "uploaded bytes were removed" in detail
+
+        # No bytes orphaned: the compensating cleanup deleted the stored object.
+        assert fake.put_calls == 1
+        assert fake.delete_calls == 1
+        assert fake.objects == {}
+        assert len(fake.deleted_keys) == 1
+        assert _KEY_SHAPE.match(fake.deleted_keys[0])
+
+        # Nothing persisted: the issue row is exactly as before the attempt and no
+        # supplement audit survived the rollback.
+        row = await _issue_row(test_session, issue_id)
+        assert row.status == before_status
+        assert list(row.evidence or []) == before_evidence
+        audits = await _audits(test_session, mission_id)
+        assert [a for a in audits if a.action == "issue_evidence_supplemented"] == []
+
+        # Retry with commit restored: the fresh attempt stores under a NEW key and
+        # succeeds; the earlier deletion is not repeated.
+        monkeypatch.setattr(AsyncSession, "commit", real_commit)
+        resp2 = await _supplement_multipart(
+            client,
+            mission_id,
+            issue_id,
+            note="A photo of the damaged unit.",
+            files=[("photo.jpg", JPEG_BYTES, "image/jpeg")],
+        )
+        assert resp2.status_code == 200, resp2.text
+        issue = resp2.json()
+        assert issue["status"] == "reported"
+        assert len(issue["evidence"]) == 1
+        assert issue["evidence"][0]["kind"] == "uploaded_file"
+
+        assert fake.put_calls == 2
+        assert fake.delete_calls == 1  # no cleanup on the success path
+        [(retry_key, (retry_body, retry_mime))] = fake.objects.items()
+        assert retry_key != fake.deleted_keys[0]
+        assert _KEY_SHAPE.match(retry_key)
+        assert retry_body == JPEG_BYTES
+        assert retry_mime == "image/jpeg"
+
+        row2 = await _issue_row(test_session, issue_id)
+        assert row2.evidence[0]["sha256"] == hashlib.sha256(JPEG_BYTES).hexdigest()
+        audits2 = await _audits(test_session, mission_id)
+        supplemented = [a for a in audits2 if a.action == "issue_evidence_supplemented"]
+        assert len(supplemented) == 1
+        assert "1 evidence item(s)" in supplemented[0].reason
